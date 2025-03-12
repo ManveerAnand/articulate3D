@@ -1,6 +1,7 @@
 # Python virtual environment
 env/
 venv/
+.env
 
 # Python cache files
 __pycache__/
@@ -15,15 +16,28 @@ build/
 # IDE specific files
 .vscode/
 .idea/
+*.swp
+*.swo
 
-# Environment variables
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+
+# Local development settings
 .env
+.env.local
 
-# Temporary files
-*.tmp
-*.temp
-*.bak
+# Blender specific
+*.blend1
+*.blend2
+*.blend3
+*.blend4
+*.blend5
 
-# Operating System files
+# Operating System
 .DS_Store
-Thumbs.db 
+Thumbs.db
