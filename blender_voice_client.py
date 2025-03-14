@@ -106,10 +106,13 @@ def receive_messages(callback=None):
             if message["status"] == "script":
                 # Extract the script and add it to the execution queue
                 script = message.get("script", "")
+                # Strip markdown code block markers if present
+                script = script.replace("```python", "").replace("```", "").strip()
                 if script and callback:
-                    callback(f"Received script: {script}")
-                    # Here you would add the script to a queue for Blender to execute
-                    # This would be implemented in the Blender addon
+                    # Print the script to terminal for debugging
+                    print(f"\nExecuting script:\n{script}\n")
+                    # Pass the entire message to the callback with cleaned script
+                    callback({"status": "script", "message": "Received script", "script": script})
             else:
                 # For other message types, just pass the message to the callback
                 if callback:

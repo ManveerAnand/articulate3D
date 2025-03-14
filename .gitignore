@@ -26,10 +26,33 @@ htmlcov/
 
 # Logs
 *.log
+error.log
+setup.log
+debug.log
+install.log
 
 # Local development settings
 .env
 .env.local
+.env.development
+.env.test
+
+# Development files
+*.bak
+*.tmp
+*.temp
+*.old
+*.orig
+*.patch
+*.diff
+*.rej
+
+# Documentation drafts and notes
+_drafts/
+_notes/
+*.draft
+*.note
+*.todo
 
 # Blender specific
 *.blend1

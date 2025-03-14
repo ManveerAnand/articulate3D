@@ -98,6 +98,50 @@ Future versions will support LiveKit for enhanced real-time audio processing:
 
 5. **Verify execution** by checking if the command was properly executed in the 3D view
 
+### Troubleshooting
+
+If you encounter issues:
+
+1. **Microphone not working**:
+   - Run `microphone_test.py` to check your microphone setup
+   - Ensure microphone permissions are enabled in your OS
+   - Try selecting a different microphone in your system settings
+
+2. **API Key Issues**:
+   - Verify your Gemini API key is valid
+   - Check the `.env` file exists and contains the correct key
+   - Ensure no spaces or quotes around the API key
+
+3. **Addon Not Starting**:
+   - Check Blender's System Console for error messages
+   - Verify all dependencies are installed (`setup.py` ran successfully)
+   - Ensure Python environment is properly set up
+
+4. **Voice Commands Not Recognized**:
+   - Speak clearly and at a normal pace
+   - Check your internet connection (required for API calls)
+   - Verify the voice recognition status in the addon panel
+
+## Contributing
+
+Contributions are welcome! Please follow these steps:
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Run tests
+5. Submit a pull request
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Acknowledgments
+
+- Google Gemini API for natural language processing
+- Blender Foundation for the amazing 3D creation suite
+- Contributors and testers who helped improve this addon
+
 ### Advanced Testing
 
 1. **Test environment handling**:
