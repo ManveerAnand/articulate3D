@@ -93,18 +93,25 @@ def transcribe_audio(recognizer, audio):
             
         print(f"Transcribed: {text}")
         return text
-    except sr.UnknownValueError:
-        print("Speech Recognition could not understand audio")
-        return None
-    except sr.RequestError as e:
-        print(f"Could not request results from Speech Recognition service; {e}")
-        # Try offline fallback if available
-        try:
-            # This requires additional setup and may not work in all environments
-            text = recognizer.recognize_sphinx(audio)
-            print(f"Offline fallback transcription: {text}")
-            return text
-        except:
+    except Exception as e:
+        # Get the exception type name to handle different speech recognition errors
+        exception_type = type(e).__name__
+        
+        if exception_type == "UnknownValueError":
+            print("Speech Recognition could not understand audio")
+            return None
+        elif exception_type == "RequestError":
+            print(f"Could not request results from Speech Recognition service; {e}")
+            # Try offline fallback if available
+            try:
+                # This requires additional setup and may not work in all environments
+                text = recognizer.recognize_sphinx(audio)
+                print(f"Offline fallback transcription: {text}")
+                return text
+            except:
+                return None
+        else:
+            print(f"Unexpected error during transcription: {e}")
             return None
 
 def process_with_gemini(text, api_key, model):
@@ -164,18 +171,21 @@ def listen_for_commands(api_key, model, callback=None):
             callback("Failed to install required dependencies. Please install manually.")
         return
     
-    # Initialize the recognizer
-    recognizer = sr.Recognizer()
-    
+    # Import speech recognition inside the function to ensure it's available
     try:
-        # Adjust for ambient noise
-        with sr.Microphone() as source:
-            if callback:
-                callback("Adjusting for ambient noise... Please wait.")
-            recognizer.adjust_for_ambient_noise(source, duration=1)
-            
-            if callback:
-                callback("Ready to listen. Speak your command...")
+        import speech_recognition as sr
+        # Initialize the recognizer
+        recognizer = sr.Recognizer()
+        
+        try:
+            # Adjust for ambient noise
+            with sr.Microphone() as source:
+                if callback:
+                    callback("Adjusting for ambient noise... Please wait.")
+                recognizer.adjust_for_ambient_noise(source, duration=1)
+                
+                if callback:
+                    callback("Ready to listen. Speak your command...")
             
             # Reset the stop flag before starting
             stop_listening_flag.clear()
@@ -215,16 +225,24 @@ def listen_for_commands(api_key, model, callback=None):
                         if callback:
                             callback("Could not understand audio. Please try again.")
                             
-                except sr.WaitTimeoutError:
-                    # This is normal, just continue listening
-                    pass
+                except Exception as e:
+                    # Check if it's a WaitTimeoutError
+                    if type(e).__name__ == "WaitTimeoutError":
+                        # This is normal, just continue listening
+                        pass
+                    else:
+                        # Re-raise other exceptions
+                        raise
                 except Exception as e:
                     if callback:
                         callback(f"Error during listening: {str(e)}")
                     break
-    except Exception as e:
+        except Exception as e:
+            if callback:
+                callback(f"Error initializing microphone: {str(e)}")
+    except ImportError as e:
         if callback:
-            callback(f"Error initializing microphone: {str(e)}")
+            callback(f"Error importing speech recognition module: {str(e)}")
     
     if callback:
         callback("Voice recognition stopped.")

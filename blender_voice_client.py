@@ -11,7 +11,7 @@ HOST = '127.0.0.1'  # Standard loopback interface address (localhost)
 PORT = 65432        # Port to listen on (non-privileged ports are > 1023)
 
 # Flag to signal the client to stop
-stop_client = threading.Event()
+stop_flag = threading.Event()
 
 # Global variables for connection management
 client_socket = None
@@ -85,7 +85,7 @@ def receive_messages(callback=None):
             callback("Not connected to server")
         return
     
-    while not stop_client.is_set():
+    while not stop_flag.is_set():
         try:
             # Set a timeout to allow checking the stop flag
             client_socket.settimeout(0.5)
@@ -136,7 +136,7 @@ def receive_messages(callback=None):
 
 def start_client(callback=None):
     """Start the voice recognition client"""
-    global client_thread
+    global client_thread, stop_flag
     
     # If already connected, stop first
     if client_thread and client_thread.is_alive():
@@ -145,8 +145,9 @@ def start_client(callback=None):
         import time
         time.sleep(0.5)
     
-    # Reset the stop flag
-    stop_client.clear()
+    # Reset the stop flag - ensure it's always a threading.Event
+    # This is critical to prevent 'function' object has no attribute 'clear' error
+    stop_flag = threading.Event()
     
     # Start the voice server if it's not already running
     server_process = start_voice_server()
@@ -175,7 +176,7 @@ def stop_client(callback=None):
     global client_thread, client_socket
     
     # Signal the thread to stop
-    stop_client.set()
+    stop_flag.set()
     
     # Close the socket
     if client_socket:

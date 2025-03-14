@@ -13,6 +13,8 @@ import os
 import json
 import requests
 import re
+import threading
+import time
 from pathlib import Path
 
 # Function to update the .env file with the API key
@@ -51,6 +53,10 @@ def update_env_file(api_key):
     with open(env_path, 'w') as file:
         file.write(content)
 
+# Global variables for voice client management
+voice_client_thread = None
+script_queue = []
+
 # Property group to store addon settings
 class VoiceCommandProperties(bpy.types.PropertyGroup):
     is_listening: bpy.props.BoolProperty(
@@ -86,6 +92,54 @@ def update_console(context, text):
     props.console_output = text
     print(text)
 
+# Function to handle received scripts
+def handle_script(context, script):
+    """Handle a script received from the voice recognition server"""
+    try:
+        # Add the script to the execution queue
+        script_queue.append(script)
+        update_console(context, f"Received script to execute")
+    except Exception as e:
+        update_console(context, f"Error handling script: {str(e)}")
+
+# Function to process messages from the voice client
+def process_voice_client_message(context, message):
+    """Process messages from the voice client"""
+    try:
+        # If it's a string, just update the console
+        if isinstance(message, str):
+            update_console(context, message)
+        # If it's a dict with a script, handle the script
+        elif isinstance(message, dict) and "script" in message:
+            handle_script(context, message["script"])
+            update_console(context, message.get("message", "Script received"))
+        # Otherwise, just convert to string and update console
+        else:
+            update_console(context, str(message))
+    except Exception as e:
+        update_console(context, f"Error processing message: {str(e)}")
+
+# Timer function to execute scripts from the queue
+def execute_scripts_timer():
+    """Timer function to execute scripts from the queue"""
+    context = bpy.context
+    
+    # Check if there are any scripts in the queue
+    if script_queue:
+        # Get the next script
+        script = script_queue.pop(0)
+        
+        try:
+            # Execute the script
+            update_console(context, "Executing script...")
+            exec(script, {"bpy": bpy})
+            update_console(context, "Script executed successfully")
+        except Exception as e:
+            update_console(context, f"Error executing script: {str(e)}")
+    
+    # Return True to keep the timer running
+    return 0.5  # Check every 0.5 seconds
+
 # Operator to start voice command
 class BLENDER_OT_voice_command(bpy.types.Operator):
     bl_idname = "wm.voice_command"
@@ -118,7 +172,7 @@ class BLENDER_OT_voice_command(bpy.types.Operator):
             return {'CANCELLED'}
         
         try:
-            # Import voice server module directly to avoid relative import issues
+            # Import voice client module directly to avoid relative import issues
             import sys
             import os
             # Add the addon directory to the path to ensure proper imports
@@ -126,8 +180,8 @@ class BLENDER_OT_voice_command(bpy.types.Operator):
             if addon_dir not in sys.path:
                 sys.path.insert(0, addon_dir)
             
-            # Now import the voice_server module
-            import voice_server
+            # Now import the blender_voice_client module
+            import blender_voice_client
             
             # Update the .env file with the API key
             update_env_file(props.api_key)
@@ -147,12 +201,18 @@ class BLENDER_OT_voice_command(bpy.types.Operator):
             props.is_listening = True
             update_console(context, "Starting voice recognition...")
             
-            # Start voice recognition in a separate process
-            voice_server.start_listening(
-                api_key=props.api_key,
-                model=props.selected_model,
-                callback=lambda msg: update_console(context, msg)
+            # Start voice recognition client
+            success = blender_voice_client.start_client(
+                lambda msg: process_voice_client_message(context, msg)
             )
+            
+            if not success:
+                self.report({'ERROR'}, "Failed to start voice recognition client")
+                props.is_listening = False
+                return {'CANCELLED'}
+            
+            # Start the timer to execute scripts
+            bpy.app.timers.register(execute_scripts_timer)
             
             return {'FINISHED'}
         except Exception as e:
@@ -171,7 +231,7 @@ class BLENDER_OT_stop_voice_command(bpy.types.Operator):
         props = context.scene.voice_command_props
         
         try:
-            # Import voice server module directly to avoid relative import issues
+            # Import voice client module directly to avoid relative import issues
             import sys
             import os
             # Add the addon directory to the path to ensure proper imports
@@ -179,12 +239,16 @@ class BLENDER_OT_stop_voice_command(bpy.types.Operator):
             if addon_dir not in sys.path:
                 sys.path.insert(0, addon_dir)
             
-            # Now import the voice_server module
-            import voice_server
+            # Now import the blender_voice_client module
+            import blender_voice_client
             
             # Stop the voice recognition
             update_console(context, "Stopping voice recognition...")
-            voice_server.stop_listening(lambda msg: update_console(context, msg))
+            blender_voice_client.stop_client(lambda msg: update_console(context, msg))
+            
+            # Unregister the timer if it's running
+            if bpy.app.timers.is_registered(execute_scripts_timer):
+                bpy.app.timers.unregister(execute_scripts_timer)
             
             # Reset the listening state
             props.is_listening = False
@@ -278,8 +342,19 @@ def register():
                     match = re.search(r'GEMINI_API_KEY=([^\n\r]*)', content)
                     if match and match.group(1) and match.group(1) != 'your_gemini_api_key_here':
                         # Set the API key in the properties
-                        for scene in bpy.data.scenes:
-                            scene.voice_command_props.api_key = match.group(1)
+                        # Use a safer approach to access scenes
+                        try:
+                            # Check if we can access the current scene
+                            if hasattr(bpy.context, 'scene'):
+                                bpy.context.scene.voice_command_props.api_key = match.group(1)
+                            # Otherwise try to access all scenes if available
+                            elif hasattr(bpy.data, 'scenes') and bpy.data.scenes:
+                                for scene in bpy.data.scenes:
+                                    scene.voice_command_props.api_key = match.group(1)
+                        except AttributeError:
+                            # If we can't access scenes now, the API key will still be in .env
+                            # and will be loaded when the addon is fully initialized
+                            print("Could not set API key to scenes - will be loaded from .env when needed")
         except Exception as env_error:
             print(f"Error loading API key from .env: {str(env_error)}")
         
