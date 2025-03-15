@@ -35,8 +35,8 @@ def get_python_executable():
 def start_voice_server():
     """Start the standalone voice server as a subprocess"""
     try:
-        # Get the path to the standalone server script
-        server_script = Path(__file__).parent / "standalone_voice_server.py"
+        # Get the path to the standalone server script in src directory
+        server_script = Path(__file__).parent / "src" / "standalone_voice_server.py"
         
         # Start the server as a subprocess
         process = subprocess.Popen(

@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     import dotenv
     # Load environment variables from .env file if it exists
-    env_path = Path(__file__).parent / '.env'
+    env_path = Path(__file__).parent.parent / '.env'
     if env_path.exists():
         dotenv.load_dotenv(env_path)
 except ImportError:
