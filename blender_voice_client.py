@@ -20,6 +20,15 @@ client_thread = None
 def get_python_executable():
     """Get the path to the Python executable in the addon's environment"""
     addon_dir = Path(__file__).parent
+    
+    # Try the Linux environment first (env_linux)
+    if sys.platform != "win32":
+        env_dir = addon_dir / "env_linux"
+        python_path = env_dir / "bin" / "python"
+        if python_path.exists():
+            return str(python_path)
+    
+    # Try the Windows environment (env)
     env_dir = addon_dir / "env"
     
     if sys.platform == "win32":
