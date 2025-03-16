@@ -67,7 +67,12 @@ def setup():
     """Set up the Articulate 3D addon"""
     # Get the addon directory
     addon_dir = Path(__file__).parent
-    env_dir = addon_dir / "env"
+    
+    # Create appropriate environment based on platform
+    if sys.platform == "win32":
+        env_dir = addon_dir / "env"
+    else:
+        env_dir = addon_dir / "env_linux"
     
     # Create virtual environment if it doesn't exist
     if not env_dir.exists():
