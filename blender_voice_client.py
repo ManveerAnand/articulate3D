@@ -5,6 +5,7 @@ import socket
 import threading
 import subprocess
 from pathlib import Path
+import bpy # Import bpy for context gathering
 
 # Socket client configuration
 HOST = '127.0.0.1'  # Standard loopback interface address (localhost)
@@ -16,6 +17,28 @@ stop_flag = threading.Event()
 # Global variables for connection management
 client_socket = None
 client_thread = None
+
+# --- Context Gathering ---
+def get_blender_context():
+    """Gathers relevant context from Blender's current state."""
+    context_data = {
+        "mode": "UNKNOWN",
+        "active_object": None,
+        "selected_objects": []
+    }
+    try:
+        # Check if bpy.context is available (might not be during startup/shutdown)
+        if bpy.context:
+            context_data["mode"] = bpy.context.mode
+            if bpy.context.active_object:
+                context_data["active_object"] = bpy.context.active_object.name
+            if bpy.context.selected_objects:
+                context_data["selected_objects"] = [obj.name for obj in bpy.context.selected_objects]
+    except Exception as e:
+        print(f"Warning: Could not get full Blender context: {e}")
+        # Return partial or default data
+    return context_data
+# --- End Context Gathering ---
 
 def get_python_executable():
     """Get the path to the Python executable in the addon's environment"""
@@ -219,7 +242,16 @@ def send_text_command(text, callback=None):
         return False
 
     try:
-        message = json.dumps({"type": "process_text", "text": text})
+        # Gather current Blender context
+        current_context = get_blender_context()
+
+        # Construct message with context
+        message_data = {
+            "type": "process_text",
+            "text": text,
+            "context": current_context # Add context here
+        }
+        message = json.dumps(message_data)
         client_socket.sendall(message.encode())
         if callback:
             # Provide immediate feedback that the text was sent

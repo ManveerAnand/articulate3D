@@ -102,8 +102,21 @@ def transcribe_audio(recognizer, audio):
             logger.error(f"Sphinx offline fallback failed: {sphinx_error}")
             return None
 
-def process_with_gemini(text, api_key, model):
-    """Process transcribed text with Gemini API"""
+def format_blender_context(context_data):
+    """Formats the received Blender context dictionary into a string for the prompt."""
+    if not context_data:
+        return "No Blender context provided."
+
+    mode = context_data.get('mode', 'UNKNOWN')
+    active = context_data.get('active_object', 'None')
+    selected = context_data.get('selected_objects', [])
+
+    # Create a concise string representation
+    context_str = f"Current Blender context: Mode={mode}, Active Object={active}, Selected Objects={selected}"
+    return context_str
+
+def process_with_gemini(text, api_key, model, blender_context=None): # Added blender_context parameter
+    """Process transcribed text with Gemini API, using Blender context."""
     try:
         logger.debug(f"Configuring Gemini API with model: {model}")
         # Configure the Gemini API
@@ -131,17 +144,27 @@ def process_with_gemini(text, api_key, model):
             safety_settings=safety_settings
         )
         
-        # Create the prompt
+        # --- Format Received Context ---
+        context_info = format_blender_context(blender_context)
+        logger.debug(f"Using context: {context_info}")
+
+        # --- Few-Shot Examples (Removed) ---
+        # --- Revised Prompt Structure ---
         prompt = f"""
-        You are an assistant that converts voice commands into Blender Python scripts.
-        Convert the following voice command into a valid Blender Python script:
-        
-        Command: {text}
-        
-        Respond ONLY with the Python script, no explanations or comments.
-        The script should be valid Blender Python API code that can be executed directly.
-        """
-        logger.debug("Sending prompt to Gemini...")
+You are a Blender 4.x Python script generator.
+Translate the following command into a `bpy` Python script compatible with Blender 4.x.
+
+**Instructions:**
+1.  **Output Python Code Only:** Your response must contain ONLY the Python script. Do not include ```python, explanations, comments, introductions, or any other text.
+2.  **Use Blender 4.x API:** Ensure the script uses `bpy` commands compatible with Blender 4.x.
+3.  **Handle Errors:** If the command is unclear, too complex to translate reliably, or potentially unsafe, output ONLY the following line:
+    `# Error: Command cannot be processed.`
+
+**Command:** {text}
+
+**Script:**
+"""
+        logger.debug(f"Sending prompt to Gemini:\n{prompt}") # Log the full prompt for debugging
         # Generate the response
         response = model_instance.generate_content(prompt)
         
@@ -298,8 +321,11 @@ def client_message_handler_thread(conn, api_key, model):
                                 logger.info(f"Processing text command from client: '{text_to_process}'")
                                 conn.sendall(json.dumps({"status": "info", "message": f"Processing text: {text_to_process}"}).encode())
 
-                                # Process with Gemini API
-                                script = process_with_gemini(text_to_process, api_key, model)
+                                # Extract context from the message
+                                received_context = client_message.get("context")
+
+                                # Process with Gemini API, passing the context
+                                script = process_with_gemini(text_to_process, api_key, model, received_context)
 
                                 if script:
                                     logger.info("Script generated successfully from text.")
