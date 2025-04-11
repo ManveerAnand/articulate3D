@@ -236,19 +236,19 @@ def voice_recognition_thread(conn, api_key, model):
                         except (ConnectionAbortedError, socket.error) as send_err:
                              logger.warning(f"Failed to send 'transcribed' status to client: {send_err}")
                         
-                        # Process with Gemini API
-                        script = process_with_gemini(text, api_key, model)
-                        
-                        if script:
-                            logger.info("Script generated successfully.")
-                            try:
+                        # Process with Gemini API - Pass None for context as this thread doesn't receive it
+                        script = process_with_gemini(text, api_key, model, blender_context=None) # Corrected indentation
+
+                        if script: # Corrected indentation
+                            logger.info("Script generated successfully.") # Corrected indentation
+                            try: # Corrected indentation
                                 conn.sendall(json.dumps({"status": "script", "message": f"Generated script", "script": script}).encode())
                             except (ConnectionAbortedError, socket.error) as send_err:
                                  logger.error(f"CRITICAL: Failed to send generated script to client: {send_err}")
                                  # This is a critical failure, maybe break here? Or rely on client timeout?
-                        else:
-                            logger.warning("Failed to generate script from command.")
-                            try:
+                        else: # Corrected indentation
+                            logger.warning("Failed to generate script from command.") # Corrected indentation
+                            try: # Corrected indentation
                                 conn.sendall(json.dumps({"status": "error", "message": "Failed to generate script from command."}).encode())
                             except (ConnectionAbortedError, socket.error) as send_err:
                                  logger.warning(f"Failed to send 'script generation failed' error to client: {send_err}")
@@ -377,7 +377,7 @@ def start_server():
     """Start the voice recognition server"""
     # Get API key from environment
     api_key = os.environ.get("GEMINI_API_KEY", "")
-    model = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash") # Defaulting to 1.5 flash as per .env.example
+    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro-preview-03-25")  # Default to "gemini-2.0-flash" 
     
     if not api_key:
         logger.critical("GEMINI_API_KEY environment variable not set.")
@@ -402,23 +402,21 @@ def start_server():
             try:
                 conn, addr = server_socket.accept()
                 conn.setblocking(True) # Ensure socket is blocking for threads
-                logger.info(f"Connected by {addr}")
+                logger.info(f"Connected by {addr}") # Corrected indentation
 
-                # --- Voice Thread Disabled ---
-                # To fix the conflict between voice input and text input processing,
-                # we are temporarily disabling the voice recognition thread.
-                # The server will now only process explicit text commands sent by the client.
-                # voice_thread = threading.Thread(
-                #     target=voice_recognition_thread,
-                #     args=(conn, api_key, model),
-                #     daemon=True
-                # )
-                # voice_thread.start()
-                logger.info("Voice recognition thread is currently disabled.")
-                # --- End Voice Thread Disabled ---
+                # --- Start Voice Thread ---
+                # This thread handles listening to the microphone and processing voice commands.
+                voice_thread = threading.Thread( # Corrected indentation
+                    target=voice_recognition_thread,
+                    args=(conn, api_key, model),
+                    daemon=True
+                )
+                voice_thread.start()
+                # logger.info("Voice recognition thread is currently disabled.") # Removed this line
+                # --- End Start Voice Thread ---
 
-                # Start client message handler thread for the same connection
-                message_thread = threading.Thread(
+                # Start client message handler thread (might still be useful for status updates or future features)
+                message_thread = threading.Thread( # Corrected indentation
                     target=client_message_handler_thread,
                     args=(conn, api_key, model), # Pass necessary args
                     daemon=True
@@ -426,13 +424,11 @@ def start_server():
                 message_thread.start()
 
                 # Keep the main server loop alive while threads run for this connection
-                # Or manage connection state differently if multiple clients are expected simultaneously
-                # For now, assume one client, wait for the message thread (or stop signal)
-                # Adjusted loop condition as voice_thread is disabled
-                while message_thread.is_alive() and not stop_server.is_set():
+                # Wait for both threads (or stop signal)
+                while (voice_thread.is_alive() or message_thread.is_alive()) and not stop_server.is_set(): # Corrected indentation
                     time.sleep(0.1)
 
-                logger.info(f"Message handler thread finished or stop signal received for connection {addr}.")
+                logger.info(f"Threads finished or stop signal received for connection {addr}.") # Corrected indentation
 
                 # Ensure threads are finished if stop signal wasn't the cause
                 # (stop_server should handle thread termination internally)
