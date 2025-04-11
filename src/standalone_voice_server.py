@@ -246,6 +246,79 @@ def voice_recognition_thread(conn, api_key, model):
     logger.info("Voice recognition thread finished.")
 
 
+# Thread function to handle incoming messages from the client
+def client_message_handler_thread(conn, api_key, model):
+    logger.info("Client message handler thread started.")
+    try:
+        while not stop_server.is_set():
+            try:
+                # Set a timeout to allow checking the stop flag periodically
+                conn.settimeout(0.5)
+                client_data = conn.recv(4096) # Increased buffer size
+                if not client_data:
+                    logger.info("Client disconnected.")
+                    break # Exit if client closes connection
+
+                if client_data:
+                    try:
+                        client_message = json.loads(client_data.decode())
+                        logger.debug(f"Received message from client: {client_message}")
+
+                        if client_message.get("type") == "process_text":
+                            text_to_process = client_message.get("text")
+                            if text_to_process:
+                                logger.info(f"Processing text command from client: '{text_to_process}'")
+                                conn.sendall(json.dumps({"status": "info", "message": f"Processing text: {text_to_process}"}).encode())
+
+                                # Process with Gemini API
+                                script = process_with_gemini(text_to_process, api_key, model)
+
+                                if script:
+                                    logger.info("Script generated successfully from text.")
+                                    # Send script back - include original text for context
+                                    conn.sendall(json.dumps({
+                                        "status": "script",
+                                        "message": f"Generated script for edited command",
+                                        "script": script,
+                                        "original_text": text_to_process # Mark this came from text input
+                                    }).encode())
+                                else:
+                                    logger.warning("Failed to generate script from text command.")
+                                    conn.sendall(json.dumps({
+                                        "status": "error",
+                                        "message": f"Failed to generate script from text: {text_to_process}"
+                                    }).encode())
+                        # Add handling for other potential message types from client if needed
+                        # elif client_message.get("type") == ...
+
+                    except json.JSONDecodeError:
+                        logger.error(f"Received invalid JSON from client: {client_data.decode()}")
+                    except Exception as e:
+                         logger.error(f"Error processing client message: {e}", exc_info=True)
+
+            except socket.timeout:
+                # No data received, check stop flag and continue
+                if stop_server.is_set():
+                    logger.info("Stop flag set, exiting message handler loop.")
+                    break
+                continue
+            except socket.error as e:
+                # Handle socket errors (e.g., connection reset)
+                logger.error(f"Socket error in message handler: {e}")
+                break # Exit loop on socket error
+            except Exception as e:
+                 logger.error(f"Unexpected error in message handler loop: {e}", exc_info=True)
+                 break # Exit loop on unexpected error
+
+    finally:
+        logger.info("Client message handler thread finished.")
+        # Optionally try to close connection here too, though start_server handles it
+        # try:
+        #     conn.close()
+        # except:
+        #     pass
+
+
 def start_server():
     """Start the voice recognition server"""
     # Get API key from environment
@@ -274,26 +347,35 @@ def start_server():
             conn = None # Initialize conn
             try:
                 conn, addr = server_socket.accept()
+                conn.setblocking(True) # Ensure socket is blocking for threads
                 logger.info(f"Connected by {addr}")
-                
-                # Start voice recognition in a new thread
-                thread = threading.Thread(
+
+                # Start voice recognition thread
+                voice_thread = threading.Thread(
                     target=voice_recognition_thread,
                     args=(conn, api_key, model),
                     daemon=True
                 )
-                thread.start()
-                
-                # Wait for the thread to finish (or stop_server signal)
-                while thread.is_alive() and not stop_server.is_set():
+                voice_thread.start()
+
+                # Start client message handler thread for the same connection
+                message_thread = threading.Thread(
+                    target=client_message_handler_thread,
+                    args=(conn, api_key, model), # Pass necessary args
+                    daemon=True
+                )
+                message_thread.start()
+
+                # Keep the main server loop alive while threads run for this connection
+                # Or manage connection state differently if multiple clients are expected simultaneously
+                # For now, assume one client, wait for threads (or stop signal)
+                while (voice_thread.is_alive() or message_thread.is_alive()) and not stop_server.is_set():
                     time.sleep(0.1)
-                    
-                # If thread finished normally, close connection
-                if thread.is_alive():
-                     logger.warning("Voice recognition thread still alive after loop exit? Forcing stop.")
-                     # Potentially signal thread more forcefully if needed, but rely on stop_server for now
-                else:
-                     logger.info("Voice recognition thread completed.")
+
+                logger.info(f"Threads finished or stop signal received for connection {addr}.")
+
+                # Ensure threads are finished if stop signal wasn't the cause
+                # (stop_server should handle thread termination internally)
 
                 # Close the connection for this client
                 if conn:

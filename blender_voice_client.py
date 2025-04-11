@@ -123,10 +123,10 @@ def receive_messages(callback=None):
                     # Pass the entire message to the callback with cleaned script
                     callback({"status": "script", "message": "Received script", "script": script})
             else:
-                # For other message types, just pass the message to the callback
+                # For other message types, pass the full message dictionary
                 if callback:
-                    callback(message["message"])
-                    
+                    callback(message) # <--- Change this line
+
         except socket.timeout:
             # This is expected, just continue the loop
             pass
@@ -208,6 +208,33 @@ def stop_client(callback=None):
         callback("Voice recognition client stopped")
     
     return True
+
+def send_text_command(text, callback=None):
+    """Send a text command directly to the server for processing"""
+    global client_socket
+    if not client_socket:
+        if callback:
+            callback({"status": "error", "message": "Not connected to server"})
+        return False
+
+    try:
+        message = json.dumps({"type": "process_text", "text": text})
+        client_socket.sendall(message.encode())
+        if callback:
+            # Provide immediate feedback that the text was sent
+            callback({"status": "info", "message": f"Sent text command: {text}"})
+        return True
+    except socket.error as e:
+        if callback:
+            callback({"status": "error", "message": f"Socket error sending text command: {e}"})
+        # Attempt to reconnect or signal error more drastically? For now, just report.
+        stop_client(callback) # Stop client on send error
+        return False
+    except Exception as e:
+        if callback:
+             callback({"status": "error", "message": f"Error sending text command: {e}"})
+        return False
+
 
 # For testing as standalone script
 if __name__ == "__main__":
