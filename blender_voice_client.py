@@ -133,10 +133,12 @@ def receive_messages(callback=None):
         except json.JSONDecodeError as e:
             if callback:
                 callback(f"Error decoding message: {e}")
-        except Exception as e:
+            # Optionally break or continue here depending on desired behavior
+        except socket.error as e: # Catch specific socket errors first (more specific than generic Exception)
             if callback:
-                callback(f"Error receiving message: {e}")
-            break
+                callback(f"Socket error receiving message: {e}")
+            break # Break loop on socket errors
+        # Removed generic Exception catch to isolate potential issues
     
     # Close the socket when done
     if client_socket:
