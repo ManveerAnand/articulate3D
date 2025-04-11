@@ -192,15 +192,16 @@ def stop_client(callback=None):
     # Signal the thread to stop
     stop_flag.set()
     
-    # Close the socket
-    if client_socket:
-        try:
-            client_socket.close()
-        except:
-            pass
-        client_socket = None
+    # Let the receive_messages thread handle closing the socket when it exits.
+    # Remove explicit socket closing here.
+    # if client_socket:
+    #     try:
+    #         client_socket.close()
+    #     except:
+    #         pass
+    #     client_socket = None
     
-    # Wait for the thread to finish (with timeout)
+    # Wait for the receive_messages thread to finish (with timeout)
     if client_thread and client_thread.is_alive():
         client_thread.join(timeout=2.0)
     
@@ -226,10 +227,10 @@ def send_text_command(text, callback=None):
         return True
     except socket.error as e:
         if callback:
+            # Report the error but don't stop the client here.
+            # Let the receive thread handle persistent connection issues.
             callback({"status": "error", "message": f"Socket error sending text command: {e}"})
-        # Attempt to reconnect or signal error more drastically? For now, just report.
-        stop_client(callback) # Stop client on send error
-        return False
+        return False # Indicate send failure
     except Exception as e:
         if callback:
              callback({"status": "error", "message": f"Error sending text command: {e}"})

@@ -162,19 +162,30 @@ def voice_recognition_thread(conn, api_key, model):
     recognizer = sr.Recognizer()
     
     try:
-        # Send ready message to Blender
-        logger.debug("Sending 'ready' status to client.")
-        conn.sendall(json.dumps({"status": "ready", "message": "Voice recognition server ready"}).encode())
-        
+        # Send ready message to Blender (with error handling)
+        try:
+            logger.debug("Sending 'ready' status to client.")
+            conn.sendall(json.dumps({"status": "ready", "message": "Voice recognition server ready"}).encode())
+        except (ConnectionAbortedError, socket.error) as send_err:
+             logger.warning(f"Failed to send 'ready' status to client: {send_err}")
+             # Don't exit thread yet, maybe connection recovers or client handler still works
+
         # Adjust for ambient noise
         with sr.Microphone() as source:
-            logger.info("Adjusting for ambient noise...")
-            conn.sendall(json.dumps({"status": "info", "message": "Adjusting for ambient noise... Please wait."}).encode())
+            try:
+                logger.info("Adjusting for ambient noise...")
+                conn.sendall(json.dumps({"status": "info", "message": "Adjusting for ambient noise... Please wait."}).encode())
+            except (ConnectionAbortedError, socket.error) as send_err:
+                 logger.warning(f"Failed to send 'adjusting noise' status to client: {send_err}")
+
             recognizer.adjust_for_ambient_noise(source, duration=1)
             
-            logger.info("Ready to listen.")
-            conn.sendall(json.dumps({"status": "info", "message": "Ready to listen. Speak your command..."}).encode())
-            
+            try:
+                logger.info("Ready to listen.")
+                conn.sendall(json.dumps({"status": "info", "message": "Ready to listen. Speak your command..."}).encode())
+            except (ConnectionAbortedError, socket.error) as send_err:
+                 logger.warning(f"Failed to send 'ready to listen' status to client: {send_err}")
+
             while not stop_server.is_set():
                 try:
                     logger.debug("Listening for audio...")
@@ -187,26 +198,43 @@ def voice_recognition_thread(conn, api_key, model):
                         break
                     
                     logger.info("Audio received, processing...")
-                    conn.sendall(json.dumps({"status": "info", "message": "Processing your command..."}).encode())
+                    try:
+                        conn.sendall(json.dumps({"status": "info", "message": "Processing your command..."}).encode())
+                    except (ConnectionAbortedError, socket.error) as send_err:
+                         logger.warning(f"Failed to send 'processing' status to client: {send_err}")
+                         # Continue processing anyway, client might still be waiting for result
                     
                     # Transcribe audio to text
                     text = transcribe_audio(recognizer, audio)
                     
                     if text:
-                        conn.sendall(json.dumps({"status": "transcribed", "message": f"Transcribed: {text}"}).encode())
+                        try:
+                            conn.sendall(json.dumps({"status": "transcribed", "message": f"Transcribed: {text}"}).encode())
+                        except (ConnectionAbortedError, socket.error) as send_err:
+                             logger.warning(f"Failed to send 'transcribed' status to client: {send_err}")
                         
                         # Process with Gemini API
                         script = process_with_gemini(text, api_key, model)
                         
                         if script:
                             logger.info("Script generated successfully.")
-                            conn.sendall(json.dumps({"status": "script", "message": f"Generated script", "script": script}).encode())
+                            try:
+                                conn.sendall(json.dumps({"status": "script", "message": f"Generated script", "script": script}).encode())
+                            except (ConnectionAbortedError, socket.error) as send_err:
+                                 logger.error(f"CRITICAL: Failed to send generated script to client: {send_err}")
+                                 # This is a critical failure, maybe break here? Or rely on client timeout?
                         else:
                             logger.warning("Failed to generate script from command.")
-                            conn.sendall(json.dumps({"status": "error", "message": "Failed to generate script from command."}).encode())
+                            try:
+                                conn.sendall(json.dumps({"status": "error", "message": "Failed to generate script from command."}).encode())
+                            except (ConnectionAbortedError, socket.error) as send_err:
+                                 logger.warning(f"Failed to send 'script generation failed' error to client: {send_err}")
                     else:
                         logger.warning("Audio transcription failed.")
-                        conn.sendall(json.dumps({"status": "error", "message": "Could not understand audio. Please try again."}).encode())
+                        try:
+                            conn.sendall(json.dumps({"status": "error", "message": "Could not understand audio. Please try again."}).encode())
+                        except (ConnectionAbortedError, socket.error) as send_err:
+                             logger.warning(f"Failed to send 'audio transcription failed' error to client: {send_err}")
                             
                 except sr.WaitTimeoutError:
                     # This is normal, just continue listening without logging spam
@@ -350,13 +378,18 @@ def start_server():
                 conn.setblocking(True) # Ensure socket is blocking for threads
                 logger.info(f"Connected by {addr}")
 
-                # Start voice recognition thread
-                voice_thread = threading.Thread(
-                    target=voice_recognition_thread,
-                    args=(conn, api_key, model),
-                    daemon=True
-                )
-                voice_thread.start()
+                # --- Voice Thread Disabled ---
+                # To fix the conflict between voice input and text input processing,
+                # we are temporarily disabling the voice recognition thread.
+                # The server will now only process explicit text commands sent by the client.
+                # voice_thread = threading.Thread(
+                #     target=voice_recognition_thread,
+                #     args=(conn, api_key, model),
+                #     daemon=True
+                # )
+                # voice_thread.start()
+                logger.info("Voice recognition thread is currently disabled.")
+                # --- End Voice Thread Disabled ---
 
                 # Start client message handler thread for the same connection
                 message_thread = threading.Thread(
@@ -368,11 +401,12 @@ def start_server():
 
                 # Keep the main server loop alive while threads run for this connection
                 # Or manage connection state differently if multiple clients are expected simultaneously
-                # For now, assume one client, wait for threads (or stop signal)
-                while (voice_thread.is_alive() or message_thread.is_alive()) and not stop_server.is_set():
+                # For now, assume one client, wait for the message thread (or stop signal)
+                # Adjusted loop condition as voice_thread is disabled
+                while message_thread.is_alive() and not stop_server.is_set():
                     time.sleep(0.1)
 
-                logger.info(f"Threads finished or stop signal received for connection {addr}.")
+                logger.info(f"Message handler thread finished or stop signal received for connection {addr}.")
 
                 # Ensure threads are finished if stop signal wasn't the cause
                 # (stop_server should handle thread termination internally)
