@@ -102,8 +102,21 @@ def transcribe_audio(recognizer, audio):
             logger.error(f"Sphinx offline fallback failed: {sphinx_error}")
             return None
 
-def process_with_gemini(text, api_key, model):
-    """Process transcribed text with Gemini API"""
+def format_blender_context(context_data):
+    """Formats the received Blender context dictionary into a string for the prompt."""
+    if not context_data:
+        return "No Blender context provided."
+
+    mode = context_data.get('mode', 'UNKNOWN')
+    active = context_data.get('active_object', 'None')
+    selected = context_data.get('selected_objects', [])
+
+    # Create a concise string representation
+    context_str = f"Current Blender context: Mode={mode}, Active Object={active}, Selected Objects={selected}"
+    return context_str
+
+def process_with_gemini(text, api_key, model, blender_context=None): # Added blender_context parameter
+    """Process transcribed text with Gemini API, using Blender context."""
     try:
         logger.debug(f"Configuring Gemini API with model: {model}")
         # Configure the Gemini API
@@ -131,17 +144,27 @@ def process_with_gemini(text, api_key, model):
             safety_settings=safety_settings
         )
         
-        # Create the prompt
+        # --- Format Received Context ---
+        context_info = format_blender_context(blender_context)
+        logger.debug(f"Using context: {context_info}")
+
+        # --- Few-Shot Examples (Removed) ---
+        # --- Revised Prompt Structure ---
         prompt = f"""
-        You are an assistant that converts voice commands into Blender Python scripts.
-        Convert the following voice command into a valid Blender Python script:
-        
-        Command: {text}
-        
-        Respond ONLY with the Python script, no explanations or comments.
-        The script should be valid Blender Python API code that can be executed directly.
-        """
-        logger.debug("Sending prompt to Gemini...")
+You are a Blender 4.x Python script generator.
+Translate the following command into a `bpy` Python script compatible with Blender 4.x.
+
+**Instructions:**
+1.  **Output Python Code Only:** Your response must contain ONLY the Python script. Do not include ```python, explanations, comments, introductions, or any other text.
+2.  **Use Blender 4.x API:** Ensure the script uses `bpy` commands compatible with Blender 4.x.
+3.  **Handle Errors:** If the command is unclear, too complex to translate reliably, or potentially unsafe, output ONLY the following line:
+    `# Error: Command cannot be processed.`
+
+**Command:** {text}
+
+**Script:**
+"""
+        logger.debug(f"Sending prompt to Gemini:\n{prompt}") # Log the full prompt for debugging
         # Generate the response
         response = model_instance.generate_content(prompt)
         
@@ -162,19 +185,30 @@ def voice_recognition_thread(conn, api_key, model):
     recognizer = sr.Recognizer()
     
     try:
-        # Send ready message to Blender
-        logger.debug("Sending 'ready' status to client.")
-        conn.sendall(json.dumps({"status": "ready", "message": "Voice recognition server ready"}).encode())
-        
+        # Send ready message to Blender (with error handling)
+        try:
+            logger.debug("Sending 'ready' status to client.")
+            conn.sendall(json.dumps({"status": "ready", "message": "Voice recognition server ready"}).encode())
+        except (ConnectionAbortedError, socket.error) as send_err:
+             logger.warning(f"Failed to send 'ready' status to client: {send_err}")
+             # Don't exit thread yet, maybe connection recovers or client handler still works
+
         # Adjust for ambient noise
         with sr.Microphone() as source:
-            logger.info("Adjusting for ambient noise...")
-            conn.sendall(json.dumps({"status": "info", "message": "Adjusting for ambient noise... Please wait."}).encode())
+            try:
+                logger.info("Adjusting for ambient noise...")
+                conn.sendall(json.dumps({"status": "info", "message": "Adjusting for ambient noise... Please wait."}).encode())
+            except (ConnectionAbortedError, socket.error) as send_err:
+                 logger.warning(f"Failed to send 'adjusting noise' status to client: {send_err}")
+
             recognizer.adjust_for_ambient_noise(source, duration=1)
             
-            logger.info("Ready to listen.")
-            conn.sendall(json.dumps({"status": "info", "message": "Ready to listen. Speak your command..."}).encode())
-            
+            try:
+                logger.info("Ready to listen.")
+                conn.sendall(json.dumps({"status": "info", "message": "Ready to listen. Speak your command..."}).encode())
+            except (ConnectionAbortedError, socket.error) as send_err:
+                 logger.warning(f"Failed to send 'ready to listen' status to client: {send_err}")
+
             while not stop_server.is_set():
                 try:
                     logger.debug("Listening for audio...")
@@ -187,26 +221,43 @@ def voice_recognition_thread(conn, api_key, model):
                         break
                     
                     logger.info("Audio received, processing...")
-                    conn.sendall(json.dumps({"status": "info", "message": "Processing your command..."}).encode())
+                    try:
+                        conn.sendall(json.dumps({"status": "info", "message": "Processing your command..."}).encode())
+                    except (ConnectionAbortedError, socket.error) as send_err:
+                         logger.warning(f"Failed to send 'processing' status to client: {send_err}")
+                         # Continue processing anyway, client might still be waiting for result
                     
                     # Transcribe audio to text
                     text = transcribe_audio(recognizer, audio)
                     
                     if text:
-                        conn.sendall(json.dumps({"status": "transcribed", "message": f"Transcribed: {text}"}).encode())
+                        try:
+                            conn.sendall(json.dumps({"status": "transcribed", "message": f"Transcribed: {text}"}).encode())
+                        except (ConnectionAbortedError, socket.error) as send_err:
+                             logger.warning(f"Failed to send 'transcribed' status to client: {send_err}")
                         
-                        # Process with Gemini API
-                        script = process_with_gemini(text, api_key, model)
-                        
-                        if script:
-                            logger.info("Script generated successfully.")
-                            conn.sendall(json.dumps({"status": "script", "message": f"Generated script", "script": script}).encode())
-                        else:
-                            logger.warning("Failed to generate script from command.")
-                            conn.sendall(json.dumps({"status": "error", "message": "Failed to generate script from command."}).encode())
+                        # Process with Gemini API - Pass None for context as this thread doesn't receive it
+                        script = process_with_gemini(text, api_key, model, blender_context=None) # Corrected indentation
+
+                        if script: # Corrected indentation
+                            logger.info("Script generated successfully.") # Corrected indentation
+                            try: # Corrected indentation
+                                conn.sendall(json.dumps({"status": "script", "message": f"Generated script", "script": script}).encode())
+                            except (ConnectionAbortedError, socket.error) as send_err:
+                                 logger.error(f"CRITICAL: Failed to send generated script to client: {send_err}")
+                                 # This is a critical failure, maybe break here? Or rely on client timeout?
+                        else: # Corrected indentation
+                            logger.warning("Failed to generate script from command.") # Corrected indentation
+                            try: # Corrected indentation
+                                conn.sendall(json.dumps({"status": "error", "message": "Failed to generate script from command."}).encode())
+                            except (ConnectionAbortedError, socket.error) as send_err:
+                                 logger.warning(f"Failed to send 'script generation failed' error to client: {send_err}")
                     else:
                         logger.warning("Audio transcription failed.")
-                        conn.sendall(json.dumps({"status": "error", "message": "Could not understand audio. Please try again."}).encode())
+                        try:
+                            conn.sendall(json.dumps({"status": "error", "message": "Could not understand audio. Please try again."}).encode())
+                        except (ConnectionAbortedError, socket.error) as send_err:
+                             logger.warning(f"Failed to send 'audio transcription failed' error to client: {send_err}")
                             
                 except sr.WaitTimeoutError:
                     # This is normal, just continue listening without logging spam
@@ -246,11 +297,87 @@ def voice_recognition_thread(conn, api_key, model):
     logger.info("Voice recognition thread finished.")
 
 
+# Thread function to handle incoming messages from the client
+def client_message_handler_thread(conn, api_key, model):
+    logger.info("Client message handler thread started.")
+    try:
+        while not stop_server.is_set():
+            try:
+                # Set a timeout to allow checking the stop flag periodically
+                conn.settimeout(0.5)
+                client_data = conn.recv(4096) # Increased buffer size
+                if not client_data:
+                    logger.info("Client disconnected.")
+                    break # Exit if client closes connection
+
+                if client_data:
+                    try:
+                        client_message = json.loads(client_data.decode())
+                        logger.debug(f"Received message from client: {client_message}")
+
+                        if client_message.get("type") == "process_text":
+                            text_to_process = client_message.get("text")
+                            if text_to_process:
+                                logger.info(f"Processing text command from client: '{text_to_process}'")
+                                conn.sendall(json.dumps({"status": "info", "message": f"Processing text: {text_to_process}"}).encode())
+
+                                # Extract context from the message
+                                received_context = client_message.get("context")
+
+                                # Process with Gemini API, passing the context
+                                script = process_with_gemini(text_to_process, api_key, model, received_context)
+
+                                if script:
+                                    logger.info("Script generated successfully from text.")
+                                    # Send script back - include original text for context
+                                    conn.sendall(json.dumps({
+                                        "status": "script",
+                                        "message": f"Generated script for edited command",
+                                        "script": script,
+                                        "original_text": text_to_process # Mark this came from text input
+                                    }).encode())
+                                else:
+                                    logger.warning("Failed to generate script from text command.")
+                                    conn.sendall(json.dumps({
+                                        "status": "error",
+                                        "message": f"Failed to generate script from text: {text_to_process}"
+                                    }).encode())
+                        # Add handling for other potential message types from client if needed
+                        # elif client_message.get("type") == ...
+
+                    except json.JSONDecodeError:
+                        logger.error(f"Received invalid JSON from client: {client_data.decode()}")
+                    except Exception as e:
+                         logger.error(f"Error processing client message: {e}", exc_info=True)
+
+            except socket.timeout:
+                # No data received, check stop flag and continue
+                if stop_server.is_set():
+                    logger.info("Stop flag set, exiting message handler loop.")
+                    break
+                continue
+            except socket.error as e:
+                # Handle socket errors (e.g., connection reset)
+                logger.error(f"Socket error in message handler: {e}")
+                break # Exit loop on socket error
+            except Exception as e:
+                 logger.error(f"Unexpected error in message handler loop: {e}", exc_info=True)
+                 break # Exit loop on unexpected error
+
+    finally:
+        logger.info("Client message handler thread finished.")
+        # Optionally try to close connection here too, though start_server handles it
+        # try:
+        #     conn.close()
+        # except:
+        #     pass
+
+
 def start_server():
     """Start the voice recognition server"""
     # Get API key from environment
     api_key = os.environ.get("GEMINI_API_KEY", "")
-    model = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash") # Defaulting to 1.5 flash as per .env.example
+    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro-preview-03-25")  # Default to "gemini-2.0-flash" 
     
     if not api_key:
         logger.critical("GEMINI_API_KEY environment variable not set.")
@@ -274,26 +401,37 @@ def start_server():
             conn = None # Initialize conn
             try:
                 conn, addr = server_socket.accept()
-                logger.info(f"Connected by {addr}")
-                
-                # Start voice recognition in a new thread
-                thread = threading.Thread(
+                conn.setblocking(True) # Ensure socket is blocking for threads
+                logger.info(f"Connected by {addr}") # Corrected indentation
+
+                # --- Start Voice Thread ---
+                # This thread handles listening to the microphone and processing voice commands.
+                voice_thread = threading.Thread( # Corrected indentation
                     target=voice_recognition_thread,
                     args=(conn, api_key, model),
                     daemon=True
                 )
-                thread.start()
-                
-                # Wait for the thread to finish (or stop_server signal)
-                while thread.is_alive() and not stop_server.is_set():
+                voice_thread.start()
+                # logger.info("Voice recognition thread is currently disabled.") # Removed this line
+                # --- End Start Voice Thread ---
+
+                # Start client message handler thread (might still be useful for status updates or future features)
+                message_thread = threading.Thread( # Corrected indentation
+                    target=client_message_handler_thread,
+                    args=(conn, api_key, model), # Pass necessary args
+                    daemon=True
+                )
+                message_thread.start()
+
+                # Keep the main server loop alive while threads run for this connection
+                # Wait for both threads (or stop signal)
+                while (voice_thread.is_alive() or message_thread.is_alive()) and not stop_server.is_set(): # Corrected indentation
                     time.sleep(0.1)
-                    
-                # If thread finished normally, close connection
-                if thread.is_alive():
-                     logger.warning("Voice recognition thread still alive after loop exit? Forcing stop.")
-                     # Potentially signal thread more forcefully if needed, but rely on stop_server for now
-                else:
-                     logger.info("Voice recognition thread completed.")
+
+                logger.info(f"Threads finished or stop signal received for connection {addr}.") # Corrected indentation
+
+                # Ensure threads are finished if stop signal wasn't the cause
+                # (stop_server should handle thread termination internally)
 
                 # Close the connection for this client
                 if conn:

@@ -5,6 +5,7 @@ import socket
 import threading
 import subprocess
 from pathlib import Path
+import bpy # Import bpy for context gathering
 
 # Socket client configuration
 HOST = '127.0.0.1'  # Standard loopback interface address (localhost)
@@ -16,6 +17,28 @@ stop_flag = threading.Event()
 # Global variables for connection management
 client_socket = None
 client_thread = None
+
+# --- Context Gathering ---
+def get_blender_context():
+    """Gathers relevant context from Blender's current state."""
+    context_data = {
+        "mode": "UNKNOWN",
+        "active_object": None,
+        "selected_objects": []
+    }
+    try:
+        # Check if bpy.context is available (might not be during startup/shutdown)
+        if bpy.context:
+            context_data["mode"] = bpy.context.mode
+            if bpy.context.active_object:
+                context_data["active_object"] = bpy.context.active_object.name
+            if bpy.context.selected_objects:
+                context_data["selected_objects"] = [obj.name for obj in bpy.context.selected_objects]
+    except Exception as e:
+        print(f"Warning: Could not get full Blender context: {e}")
+        # Return partial or default data
+    return context_data
+# --- End Context Gathering ---
 
 def get_python_executable():
     """Get the path to the Python executable in the addon's environment"""
@@ -123,10 +146,10 @@ def receive_messages(callback=None):
                     # Pass the entire message to the callback with cleaned script
                     callback({"status": "script", "message": "Received script", "script": script})
             else:
-                # For other message types, just pass the message to the callback
+                # For other message types, pass the full message dictionary
                 if callback:
-                    callback(message["message"])
-                    
+                    callback(message) # <--- Change this line
+
         except socket.timeout:
             # This is expected, just continue the loop
             pass
@@ -192,15 +215,16 @@ def stop_client(callback=None):
     # Signal the thread to stop
     stop_flag.set()
     
-    # Close the socket
-    if client_socket:
-        try:
-            client_socket.close()
-        except:
-            pass
-        client_socket = None
+    # Let the receive_messages thread handle closing the socket when it exits.
+    # Remove explicit socket closing here.
+    # if client_socket:
+    #     try:
+    #         client_socket.close()
+    #     except:
+    #         pass
+    #     client_socket = None
     
-    # Wait for the thread to finish (with timeout)
+    # Wait for the receive_messages thread to finish (with timeout)
     if client_thread and client_thread.is_alive():
         client_thread.join(timeout=2.0)
     
@@ -208,6 +232,42 @@ def stop_client(callback=None):
         callback("Voice recognition client stopped")
     
     return True
+
+def send_text_command(text, callback=None):
+    """Send a text command directly to the server for processing"""
+    global client_socket
+    if not client_socket:
+        if callback:
+            callback({"status": "error", "message": "Not connected to server"})
+        return False
+
+    try:
+        # Gather current Blender context
+        current_context = get_blender_context()
+
+        # Construct message with context
+        message_data = {
+            "type": "process_text",
+            "text": text,
+            "context": current_context # Add context here
+        }
+        message = json.dumps(message_data)
+        client_socket.sendall(message.encode())
+        if callback:
+            # Provide immediate feedback that the text was sent
+            callback({"status": "info", "message": f"Sent text command: {text}"})
+        return True
+    except socket.error as e:
+        if callback:
+            # Report the error but don't stop the client here.
+            # Let the receive thread handle persistent connection issues.
+            callback({"status": "error", "message": f"Socket error sending text command: {e}"})
+        return False # Indicate send failure
+    except Exception as e:
+        if callback:
+             callback({"status": "error", "message": f"Error sending text command: {e}"})
+        return False
+
 
 # For testing as standalone script
 if __name__ == "__main__":
