@@ -15,7 +15,32 @@ import requests
 import re
 import threading
 import time
+import logging # Import logging
+import sys # Import sys
 from pathlib import Path
+
+# --- Logging Setup ---
+log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+log_file = Path(__file__).parent / 'articulate3d_addon.log' # Log file in project root
+
+# Configure root logger for console output (Blender's console)
+logging.basicConfig(level=logging.INFO, format=log_format, handlers=[logging.StreamHandler(sys.stdout)])
+
+# Create a specific logger for this addon module
+logger = logging.getLogger("Articulate3DAddon")
+logger.setLevel(logging.INFO) # Ensure logger level is set
+
+# Add file handler
+try:
+    file_handler = logging.FileHandler(log_file, mode='a') # Use append mode
+    file_handler.setFormatter(logging.Formatter(log_format))
+    logger.addHandler(file_handler)
+    logger.info(f"--- Addon Log session started. Logging to {log_file} ---")
+except Exception as e:
+    # Use root logger (prints to Blender console) if specific logger fails
+    logging.error(f"Failed to set up file logging to {log_file}: {e}")
+
+# --- End Logging Setup ---
 
 # Function to update the .env file with the API key
 def update_env_file(api_key):
@@ -88,9 +113,11 @@ class VoiceCommandProperties(bpy.types.PropertyGroup):
 
 # Function to update console output
 def update_console(context, text):
+    # Keep updating the UI property
     props = context.scene.voice_command_props
     props.console_output = text
-    print(text)
+    # Also log the message
+    logger.info(text)
 
 # Function to handle received scripts
 def handle_script(context, script):
@@ -100,7 +127,9 @@ def handle_script(context, script):
         script_queue.append(script)
         update_console(context, f"Received script to execute")
     except Exception as e:
-        update_console(context, f"Error handling script: {str(e)}")
+        logger.error(f"Error handling script: {str(e)}", exc_info=True)
+        ui_error_msg = f"Error handling script: {str(e)}"
+        update_console(context, ui_error_msg)
 
 # Function to process messages from the voice client
 def process_voice_client_message(context, message):
@@ -110,14 +139,26 @@ def process_voice_client_message(context, message):
         if isinstance(message, str):
             update_console(context, message)
         # If it's a dict with a script, handle the script
-        elif isinstance(message, dict) and "script" in message:
-            handle_script(context, message["script"])
-            update_console(context, message.get("message", "Script received"))
+        elif isinstance(message, dict):
+            status = message.get("status", "unknown")
+            msg_text = message.get("message", "No message content.")
+            if status == "script":
+                handle_script(context, message["script"])
+                update_console(context, f"Server: {msg_text}")
+            elif status == "error":
+                logger.error(f"Received error from server: {msg_text}")
+                update_console(context, f"Server Error: {msg_text}")
+            else: # info, transcribed, ready, stopped etc.
+                update_console(context, f"Server: {msg_text}")
         # Otherwise, just convert to string and update console
         else:
+            # Log the raw message if it's not a string or dict
+            logger.warning(f"Received unexpected message format: {type(message)} - {message}")
             update_console(context, str(message))
     except Exception as e:
-        update_console(context, f"Error processing message: {str(e)}")
+        ui_error_msg = f"Error processing message from server: {str(e)}"
+        logger.error(ui_error_msg, exc_info=True)
+        update_console(context, ui_error_msg)
 
 # Timer function to execute scripts from the queue
 def execute_scripts_timer():
@@ -133,9 +174,11 @@ def execute_scripts_timer():
             # Execute the script
             update_console(context, "Executing script...")
             exec(script, {"bpy": bpy})
-            update_console(context, "Script executed successfully")
+            update_console(context, "Script executed successfully.")
         except Exception as e:
-            update_console(context, f"Error executing script: {str(e)}")
+            ui_error_msg = f"Script Execution Error: {str(e)}"
+            logger.error(ui_error_msg, exc_info=True)
+            update_console(context, ui_error_msg)
     
     # Return True to keep the timer running
     return 0.5  # Check every 0.5 seconds
@@ -156,11 +199,18 @@ class BLENDER_OT_voice_command(bpy.types.Operator):
             if response.status_code == 200:
                 return True
             else:
-                error_msg = response.json().get('error', {}).get('message', 'Unknown error')
-                print(f"API key validation error: {error_msg} (Status code: {response.status_code})")
+                error_msg = response.json().get('error', {}).get('message', 'Unknown API error')
+                logger.error(f"API key validation failed: {error_msg} (Status code: {response.status_code})")
+                # Provide slightly more context for the user report
+                self.report({'ERROR'}, f"API Key Validation Failed: {error_msg}")
                 return False
-        except Exception as e:
-            print(f"API key validation error: {str(e)}")
+        except requests.exceptions.RequestException as e: # Catch specific network errors
+             logger.error(f"API key validation failed due to network error: {str(e)}", exc_info=True)
+             self.report({'ERROR'}, f"Network Error during API Key Validation: {e}")
+             return False
+        except Exception as e: # Catch other potential errors like JSON decoding
+            logger.error(f"Unexpected error during API key validation: {str(e)}", exc_info=True)
+            self.report({'ERROR'}, f"Unexpected Error during API Key Validation: {e}")
             return False
     
     def execute(self, context):
@@ -191,8 +241,8 @@ class BLENDER_OT_voice_command(bpy.types.Operator):
             is_valid = self.validate_api_key(props.api_key)
             
             if not is_valid:
-                self.report({'ERROR'}, "Invalid API key. Please check your Gemini API key.")
-                update_console(context, "API key validation failed. Please check your key.")
+                # Error already reported and logged by validate_api_key
+                update_console(context, "API key validation failed. Please check your key and network connection.")
                 # Make sure to reset the listening state
                 props.is_listening = False
                 return {'CANCELLED'}
@@ -207,17 +257,30 @@ class BLENDER_OT_voice_command(bpy.types.Operator):
             )
             
             if not success:
-                self.report({'ERROR'}, "Failed to start voice recognition client")
+                ui_error_msg = "Failed to start or connect to voice recognition server. Check server logs."
+                self.report({'ERROR'}, ui_error_msg)
+                update_console(context, ui_error_msg)
                 props.is_listening = False
                 return {'CANCELLED'}
             
             # Start the timer to execute scripts
-            bpy.app.timers.register(execute_scripts_timer)
+            if not bpy.app.timers.is_registered(execute_scripts_timer):
+                bpy.app.timers.register(execute_scripts_timer)
             
             return {'FINISHED'}
-        except Exception as e:
+        except ImportError as e:
+             # Catch specific import errors if blender_voice_client is missing
             props.is_listening = False
-            error_msg = f"Error: {str(e)}"
+            error_msg = f"Import Error: Failed to import blender_voice_client. Ensure it's in the correct path. Details: {str(e)}"
+            logger.critical(error_msg, exc_info=True)
+            update_console(context, error_msg)
+            self.report({'ERROR'}, error_msg)
+            return {'CANCELLED'}
+        except Exception as e:
+            # Catch other potential errors during startup
+            props.is_listening = False
+            error_msg = f"Error starting voice command: {str(e)}"
+            logger.error(error_msg, exc_info=True)
             update_console(context, error_msg)
             self.report({'ERROR'}, error_msg)
             return {'CANCELLED'}
@@ -254,8 +317,16 @@ class BLENDER_OT_stop_voice_command(bpy.types.Operator):
             props.is_listening = False
             
             return {'FINISHED'}
+        except ImportError as e:
+             # Catch specific import errors if blender_voice_client is missing
+            error_msg = f"Import Error: Failed to import blender_voice_client. Ensure it's in the correct path. Details: {str(e)}"
+            logger.critical(error_msg, exc_info=True)
+            update_console(context, error_msg)
+            self.report({'ERROR'}, error_msg)
+            # Still reset the listening state
         except Exception as e:
-            error_msg = f"Error stopping voice recognition: {str(e)}"
+            error_msg = f"Error stopping voice recognition client: {str(e)}"
+            logger.error(error_msg, exc_info=True)
             update_console(context, error_msg)
             self.report({'ERROR'}, error_msg)
             # Still reset the listening state
@@ -354,13 +425,13 @@ def register():
                         except AttributeError:
                             # If we can't access scenes now, the API key will still be in .env
                             # and will be loaded when the addon is fully initialized
-                            print("Could not set API key to scenes - will be loaded from .env when needed")
+                            logger.warning("Could not set API key to scenes - will be loaded from .env when needed")
         except Exception as env_error:
-            print(f"Error loading API key from .env: {str(env_error)}")
+            logger.error(f"Error loading API key from .env: {str(env_error)}", exc_info=True)
         
-        print("Articulate 3D Add-on registered successfully!")
+        logger.info("Articulate 3D Add-on registered successfully!")
     except Exception as e:
-        print(f"Error registering Articulate 3D Add-on: {str(e)}")
+        logger.critical(f"Error registering Articulate 3D Add-on: {str(e)}", exc_info=True)
 
 def unregister():
     try:
@@ -370,8 +441,9 @@ def unregister():
         
         # Remove properties
         del bpy.types.Scene.voice_command_props
+        logger.info("Articulate 3D Add-on unregistered.")
     except Exception as e:
-        print(f"Error unregistering Articulate 3D Add-on: {str(e)}")
+        logger.error(f"Error unregistering Articulate 3D Add-on: {str(e)}", exc_info=True)
 
 if __name__ == "__main__":
     register()
