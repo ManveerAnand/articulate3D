@@ -233,6 +233,63 @@ def stop_client(callback=None):
     
     return True
 
+def send_configuration(model, method, callback=None):
+    """Send the selected model and method configuration to the server"""
+    global client_socket
+    if not client_socket:
+        if callback:
+            callback({"status": "error", "message": "Not connected to server"})
+        return False
+    try:
+        message_data = {
+            "type": "configure",
+            "model": model,
+            "method": method
+        }
+        message = json.dumps(message_data)
+        client_socket.sendall(message.encode())
+        print(f"Sent configuration: Model={model}, Method={method}") # Replaced logger with print
+        if callback:
+            callback({"status": "info", "message": f"Configuration sent (Model: {model}, Method: {method})"})
+        return True
+    except socket.error as e:
+        error_msg = f"Socket error sending configuration: {e}"
+        print(error_msg) # Replaced logger with print
+        if callback:
+            callback({"status": "error", "message": error_msg})
+        return False
+    except Exception as e:
+        error_msg = f"Error sending configuration: {e}"
+        print(error_msg) # Replaced logger with print
+        if callback:
+             callback({"status": "error", "message": error_msg})
+        return False
+
+def send_context_response(request_id, context_dict, callback=None):
+    """Send the gathered Blender context back to the server for a specific request"""
+    global client_socket
+    if not client_socket:
+        # No callback here, as this is usually triggered internally
+        print("Cannot send context response: Not connected to server.") # Replaced logger with print
+        return False
+    try:
+        message_data = {
+            "type": "context_response",
+            "request_id": request_id,
+            "context": context_dict
+        }
+        message = json.dumps(message_data)
+        client_socket.sendall(message.encode())
+        print(f"Sent context response for request_id: {request_id}") # Replaced logger with print
+        return True
+    except socket.error as e:
+        print(f"Socket error sending context response for {request_id}: {e}") # Replaced logger with print
+        return False
+    except Exception as e:
+        print(f"Error sending context response for {request_id}: {e}") # Replaced logger with print
+        return False
+
+
 def send_text_command(text, callback=None):
     """Send a text command directly to the server for processing"""
     global client_socket

@@ -111,11 +111,21 @@ class VoiceCommandProperties(bpy.types.PropertyGroup):
     )
     selected_model: bpy.props.EnumProperty(
         items=[
-            ("gemini-2.0-flash", "Gemini 2.0 Flash", "Fast model"),
-            ("gemini-2.0-pro", "Gemini 2.0 Pro", "Advanced model"),
-            ("gemini-2.0-thinking", "Gemini 2.0 Thinking", "Complex reasoning"),
-            ("gemini-1.5-flash", "Gemini 1.5 Flash", "Stable flash")
+            # Updated model list - check exact names from Google AI Studio/docs if needed
+            ("gemini-2.0-flash", "Gemini 2.0 Flash", "Fast model for general tasks"),
+            ("gemini-2.5-pro-exp-03-25", "Gemini 2.5 Pro Exp", "Latest advanced model (Experimental)"),
+            # Add other relevant models if desired, e.g., older stable ones
+            # ("gemini-1.5-pro-latest", "Gemini 1.5 Pro", "Previous generation Pro model"),
+            # ("gemini-1.5-flash-latest", "Gemini 1.5 Flash", "Previous generation Flash model"),
         ], name="Gemini Model", default="gemini-2.0-flash"
+    )
+    audio_method: bpy.props.EnumProperty(
+        items=[
+            ("gemini", "Gemini Direct", "Process audio directly with Gemini (Fastest)"),
+            ("whisper", "Whisper", "Transcribe with Whisper (Base model)"),
+            ("google_stt", "Google Cloud STT", "Transcribe with Google STT (Requires Cloud setup)"),
+        ], name="Audio Method", default="whisper",
+        description="Method used to process voice commands"
     )
     console_output: bpy.props.StringProperty(name="Console Output", default="Ready...", maxlen=1024)
     show_history: bpy.props.BoolProperty(name="Show Command History", default=True)
@@ -144,39 +154,74 @@ def process_voice_client_message(context, message):
         elif isinstance(message, dict):
             status = message.get("status", "unknown")
             msg_text = message.get("message", "No message content.")
+            request_id = message.get("request_id") # Get request ID if present
 
-            if status == "transcribed":
+            if status == "request_context":
+                # Server is asking for context for a voice command
+                logger.info(f"Received context request {request_id}: {msg_text}")
+                update_console(context, f"Server: {msg_text}") # Show transcription/status
+                # Immediately gather and send context back
+                try:
+                    import sys, os
+                    addon_dir = os.path.dirname(os.path.abspath(__file__))
+                    if addon_dir not in sys.path: sys.path.insert(0, addon_dir)
+                    import blender_voice_client
+                    context_dict = blender_voice_client.get_blender_context()
+                    blender_voice_client.send_context_response(request_id, context_dict)
+                    logger.debug(f"Sent context response for {request_id}")
+                except Exception as e:
+                    logger.error(f"Failed to send context response for {request_id}: {e}", exc_info=True)
+                    update_console(context, f"Error sending context: {e}")
+
+            elif status == "transcribed": # This might be replaced by request_context message now
                 last_transcription = msg_text.replace("Transcribed: ", "").strip()
                 update_console(context, f"Server: {msg_text}")
             elif status == "script":
                 script_content = message.get("script", "")
                 original_text = message.get("original_text") # Text from edited command
-                command_text = original_text if original_text else last_transcription
+                # If request_id is present, it came from a voice command via context request
+                # If original_text is present, it came from a direct text command
+                command_text = original_text # Prefer text command origin if available
+                if not command_text and request_id:
+                    # Try to find the original transcription from the history based on request_id?
+                    # This is complex. For now, just use a placeholder if it came from voice.
+                    # We need the listener thread to maybe store the transcription with the request_id.
+                    # Let's assume for now the 'message' in the script response might contain useful info.
+                    command_text = f"Voice Command ({request_id})" # Placeholder
 
-                if command_text:
+                if script_content: # Only queue if there's a script
                     script_queue.append((script_content, command_text))
-                    update_console(context, f"Received script for '{command_text}' - queued.")
-                    if not original_text: # Clear only if it was from voice
-                        last_transcription = None
+                    update_console(context, f"Received script for '{command_text or 'Unknown'}' - queued.")
+                    # Don't clear last_transcription here, it's handled by context request flow
                 else:
-                    logger.warning("Received script message without associated command text.")
-                    script_queue.append((script_content, None)) # Queue anyway
-                    update_console(context, "Received script (unknown origin) - queued.")
+                     logger.warning(f"Received script message status but no script content for '{command_text or 'Unknown'}'.")
+                     update_console(context, f"Script generation failed for '{command_text or 'Unknown'}'.")
+                     # Log failed attempt to history
+                     entry = {
+                         'transcription': command_text or 'Failed Voice Command',
+                         'status': 'Failed Generation',
+                         'script': None, 'timestamp': time.time(), 'starred': False
+                     }
+                     command_history.append(entry)
+
 
             elif status == "error":
-                logger.error(f"Received error from server: {msg_text}")
-                update_console(context, f"Server Error: {msg_text}")
-                if last_transcription: # Log error against last voice command attempt
+                error_msg = f"Server Error: {msg_text}"
+                logger.error(error_msg)
+                update_console(context, error_msg)
+                # Log error to history if it corresponds to a known request
+                if request_id:
                      entry = {
-                        'transcription': last_transcription, 'status': 'Failed Generation/STT',
+                        'transcription': f"Voice Command ({request_id})",
+                        'status': 'Server Error',
                         'script': None, 'timestamp': time.time(), 'starred': False
                      }
                      command_history.append(entry)
-                     last_transcription = None
-                else:
-                    logger.warning("Received error message but last_transcription was None.")
+                # else: # Error not linked to a specific voice request
+                #     logger.warning("Received general server error.")
+
             elif status in ["info", "ready", "stopped"]:
-                 logger.debug(f"Received status '{status}' message.")
+                 logger.info(f"Received status '{status}': {msg_text}")
                  update_console(context, f"Server: {msg_text}")
             else:
                 logger.warning(f"Received message with unhandled status: {status}")
@@ -282,8 +327,28 @@ class BLENDER_OT_voice_command(bpy.types.Operator):
                 update_console(context, ui_error_msg)
                 props.is_listening = False
                 return {'CANCELLED'}
+
+            # Send configuration immediately after successful connection
+            logger.info("Sending configuration to server...")
+            config_success = blender_voice_client.send_configuration(
+                props.selected_model,
+                props.audio_method,
+                callback=lambda msg: process_voice_client_message(context, msg) # Use existing handler for feedback
+            )
+            if not config_success:
+                 ui_error_msg = "Failed to send configuration to server."
+                 self.report({'ERROR'}, ui_error_msg)
+                 update_console(context, ui_error_msg)
+                 # Stop the client if config fails? Or let it run? For now, stop.
+                 blender_voice_client.stop_client(lambda msg: update_console(context, msg))
+                 props.is_listening = False
+                 return {'CANCELLED'}
+
+            # Register timer only after successful connection and config send
             if not bpy.app.timers.is_registered(execute_scripts_timer):
                 bpy.app.timers.register(execute_scripts_timer)
+
+            update_console(context, "Client connected and configured. Listening...")
             return {'FINISHED'}
         except Exception as e:
             props.is_listening = False
@@ -545,9 +610,13 @@ class BLENDER_PT_voice_command_panel(bpy.types.Panel):
         # Console output
         console_box = layout.box()
         console_box.label(text="Console Output:", icon="CONSOLE")
-        console_box.prop(props, "console_output")
-        console_box.prop(props, "selected_model")
-        
+        console_box.prop(props, "console_output", text="") # Use empty text label
+
+        # Model and Method Selection
+        config_row = layout.row(align=True)
+        config_row.prop(props, "selected_model")
+        config_row.prop(props, "audio_method")
+
         # Command buttons
         buttons_row = layout.row(align=True)
         buttons_row.enabled = bool(props.api_key)

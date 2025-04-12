@@ -29,21 +29,19 @@ def install_dependencies(env_dir):
         # Base dependencies - ensure python-dotenv is installed first to avoid import errors
         dependencies = [
             "python-dotenv",
-            "SpeechRecognition", 
-            "PyAudio", 
-            "google-generativeai", 
+            "SpeechRecognition",
+            "PyAudio", # Keep for now, client might need it
+            "google-genai", # Updated SDK
+            "openai-whisper", # Added for Whisper
+            "google-cloud-speech", # Added for Google Cloud STT
+            "sounddevice", # Recommended for client recording
+            "numpy", # Often needed with audio/sounddevice
             "pytest"
         ]
         
-        # Check if LiveKit should be installed
-        use_livekit = input("Do you want to enable LiveKit for enhanced real-time audio processing? (y/n): ").lower() == 'y'
-        if use_livekit:
-            dependencies.append("livekit-server-sdk")
-            print("LiveKit support will be enabled.")
-        
-        # Install required packages
+        # Install required packages using 'python -m pip' for better reliability
         subprocess.check_call([
-            str(pip_path), "install", 
+            str(python_path), "-m", "pip", "install",
             *dependencies
         ])
         
@@ -58,6 +56,8 @@ def install_dependencies(env_dir):
             print(".env file created. Please edit it to add your API keys.")
         
         print("Dependencies installed successfully!")
+        print("\nNote: If using the Whisper method, ensure ffmpeg is installed on your system.")
+        print("(e.g., 'sudo apt install ffmpeg' or 'brew install ffmpeg' or 'choco install ffmpeg')")
         return True
     except subprocess.CalledProcessError as e:
         print(f"Error installing dependencies: {e}")
