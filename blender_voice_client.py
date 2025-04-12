@@ -23,20 +23,45 @@ def get_blender_context():
     """Gathers relevant context from Blender's current state."""
     context_data = {
         "mode": "UNKNOWN",
-        "active_object": None,
-        "selected_objects": []
+        "scene_name": None,
+        "active_object": None, # Will be a dict if active
+        "selected_objects": [], # Will be a list of dicts
+        "scene_objects": [] # List of names in the main collection
     }
     try:
-        # Check if bpy.context is available (might not be during startup/shutdown)
-        if bpy.context:
+        if bpy.context and bpy.context.scene:
             context_data["mode"] = bpy.context.mode
-            if bpy.context.active_object:
-                context_data["active_object"] = bpy.context.active_object.name
-            if bpy.context.selected_objects:
-                context_data["selected_objects"] = [obj.name for obj in bpy.context.selected_objects]
+            context_data["scene_name"] = bpy.context.scene.name
+
+            # Get active object details safely
+            active_obj = getattr(bpy.context, 'active_object', None) # Use getattr
+            if active_obj:
+                context_data["active_object"] = {
+                    "name": active_obj.name,
+                    "type": active_obj.type,
+                    "location": tuple(active_obj.location),
+                    "rotation_euler": tuple(active_obj.rotation_euler),
+                    "scale": tuple(active_obj.scale)
+                }
+
+            # Get selected objects details safely
+            selected_objs = getattr(bpy.context, 'selected_objects', []) # Use getattr
+            if selected_objs:
+                context_data["selected_objects"] = [
+                    {"name": obj.name, "type": obj.type}
+                    for obj in selected_objs
+                ]
+
+            # Get names of objects in the scene's main collection
+            if bpy.context.scene.collection and bpy.context.scene.collection.objects:
+                 context_data["scene_objects"] = [obj.name for obj in bpy.context.scene.collection.objects]
+
     except Exception as e:
-        print(f"Warning: Could not get full Blender context: {e}")
-        # Return partial or default data
+        # Removed problematic operator call from except block
+        print(f"Error getting Blender context: {e}") # Keep print for console
+        # Optionally report to Blender's info area:
+        # bpy.context.window_manager.popup_menu(lambda self, context: self.layout.label(text=f"Context Error: {e}"), title="Articulate3D Error", icon='ERROR')
+
     return context_data
 # --- End Context Gathering ---
 

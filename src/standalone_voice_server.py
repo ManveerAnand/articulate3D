@@ -1,3 +1,4 @@
+# FILE: src/standalone_voice_server.py
 import os
 import sys
 import time
@@ -13,122 +14,200 @@ import tempfile
 import numpy as np
 from pathlib import Path
 
-# --- Diagnostic Prints (Optional: Remove after confirming fix) ---
-# import sys
-# import os
-# print(f"--- Python Executable: {sys.executable}")
-# print(f"--- Working Directory: {os.getcwd()}")
-# print("--- sys.path ---")
-# for p in sys.path:
-#     print(p)
-# print("--- End sys.path ---")
-# try:
-#     import google.generativeai
-#     print("--- Successfully imported google.generativeai ---")
-# except ImportError as e:
-#     print(f"--- FAILED to import google.generativeai: {e} ---")
-# --- End Diagnostic Prints ---
-
+# --- Add this right after imports ---
+CODE_VERSION = "2025-04-12_2210_Refactor" # Use a unique identifier/timestamp
+# --- End Add ---
 
 # --- Logging Setup ---
-log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+log_format = '%(asctime)s - %(name)s - %(levelname)s - [%(threadName)s] - %(message)s' # Added thread name
 log_file = Path(__file__).parent.parent / 'articulate3d_server.log' # Log file in project root
 
 # Configure root logger for console output
-# Set level to DEBUG to see the detailed logs we are adding
 logging.basicConfig(level=logging.DEBUG, format=log_format, handlers=[logging.StreamHandler(sys.stdout)])
 
 # Create a specific logger for this module
 logger = logging.getLogger(__name__) # Use __name__ for logger name
-# Ensure this logger also captures DEBUG level messages
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.DEBUG) # Ensure this logger captures DEBUG
 
 # Add file handler
 try:
+    # Ensure the log directory exists
+    log_file.parent.mkdir(parents=True, exist_ok=True)
     file_handler = logging.FileHandler(log_file, mode='a') # Use append mode
     file_handler.setFormatter(logging.Formatter(log_format))
-    # Set file handler level to DEBUG as well
-    file_handler.setLevel(logging.DEBUG)
-    logger.addHandler(file_handler)
-    # Prevent logs from propagating to the root logger if handlers are added here
-    logger.propagate = False
+    file_handler.setLevel(logging.DEBUG) # Log DEBUG to file too
+    # Prevent duplicate logging to root/console if handlers are added here
+    if not logger.hasHandlers():
+         logger.addHandler(file_handler)
+         logger.propagate = False # Prevent propagation if we added our own handler
+    else: # If handlers already exist (e.g., basicConfig added one), just add file handler
+         logger.addHandler(file_handler)
+
     logger.info(f"--- Log session started. Logging to {log_file} ---")
 except Exception as e:
-    # Use root logger if specific logger fails during setup
-    logging.error(f"Failed to set up file logging to {log_file}: {e}")
+    logging.error(f"Failed to set up file logging to {log_file}: {e}", exc_info=True)
 
-# --- End Logging Setup ---
+# --- Add this after logger is configured ---
+logger.critical(f"--- SERVER SCRIPT RUNNING - VERSION: {CODE_VERSION} ---")
+# --- End Add ---
 
 
-# Try to import dotenv with better error handling
+# --- Environment Variable Loading ---
 try:
+    # Ensure dotenv is imported if available
     import dotenv
-    # Load environment variables from .env file if it exists
     project_root = Path(__file__).parent.parent
     env_path = project_root / '.env'
     if env_path.exists():
         logger.info(f"Loading environment variables from {env_path}")
-        dotenv.load_dotenv(env_path)
+        dotenv.load_dotenv(dotenv_path=env_path, override=True) # Override ensures .env takes precedence
     else:
         logger.info(".env file not found, relying on system environment variables.")
+
+    # Verify API Key loaded
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+    if not GEMINI_API_KEY or GEMINI_API_KEY == "your_gemini_api_key_here":
+        logger.critical("GEMINI_API_KEY not found or not set in environment/.env file. Server cannot function.")
+        # Optionally sys.exit(1) here if you want it to hard stop
+    else:
+         logger.info("GEMINI_API_KEY loaded successfully.")
+         # Attempt global configuration ONCE at startup - library might require this
+         try:
+             import google.generativeai as genai # Import here for configure call
+             genai.configure(api_key=GEMINI_API_KEY)
+             logger.info("Global genai configuration attempted.")
+         except ImportError:
+             logger.error("Failed to import google.generativeai for global configure call.")
+         except Exception as e:
+             logger.error(f"Failed to perform global genai.configure: {e}", exc_info=True)
+
 except ImportError:
-    logger.warning("python-dotenv module not found. Environment variables will not be loaded from .env file.")
-    logger.warning("Please run setup.py to install required dependencies.")
+    logger.warning("python-dotenv module not found. Will rely solely on system environment variables.")
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") # Still try to get it
+    if not GEMINI_API_KEY or GEMINI_API_KEY == "your_gemini_api_key_here":
+        logger.critical("GEMINI_API_KEY not found or not set in system environment. Server cannot function.")
+    # Also attempt global configure here if dotenv wasn't found
+    if GEMINI_API_KEY and GEMINI_API_KEY != "your_gemini_api_key_here":
+        try:
+             import google.generativeai as genai # Import here for configure call
+             genai.configure(api_key=GEMINI_API_KEY)
+             logger.info("Global genai configuration attempted (no dotenv).")
+        except ImportError:
+             logger.error("Failed to import google.generativeai for global configure call (no dotenv).")
+        except Exception as e:
+             logger.error(f"Failed to perform global genai.configure (no dotenv): {e}", exc_info=True)
 
-# --- CORRECTED Import for AI and Audio libraries ---
+
+# --- Library Imports & Dependency Check ---
+# Place imports after env vars are loaded, as some libraries might use them during import
+DEPENDENCIES_INSTALLED = True
 try:
-    # Use the standard import convention for the library
     import google.generativeai as genai
-    # Remove the specific types import: from google.generativeai import types as genai_types
-    import whisper
-    from google.cloud import speech
-    import speech_recognition as sr # Keep for now, might be used by client or for reference
-    import pyaudio # Keep for now
-    DEPENDENCIES_INSTALLED = True
-    logger.debug("Successfully imported core AI/Audio libraries.")
+    logger.debug("Successfully imported google.generativeai")
 except ImportError as e:
+    logger.critical(f"Failed to import google.generativeai: {e}. Please run setup.py.")
     DEPENDENCIES_INSTALLED = False
-    # Log the specific import error encountered
-    logger.critical(f"Required dependencies not installed: {e}. Please run setup.py first.")
-    # Exit if core dependencies are missing
-    if "google.generativeai" in str(e) or "whisper" in str(e) or "google.cloud" in str(e):
-         sys.exit(1)
-# --- End CORRECTED Import ---
+
+try:
+    import whisper
+    logger.debug("Successfully imported whisper")
+except ImportError as e:
+    logger.critical(f"Failed to import whisper: {e}. Please run setup.py.")
+    DEPENDENCIES_INSTALLED = False
+
+try:
+    from google.cloud import speech
+    logger.debug("Successfully imported google.cloud.speech")
+except ImportError as e:
+    logger.warning(f"Failed to import google.cloud.speech: {e}. Google Cloud STT method unavailable.")
+
+try:
+    import speech_recognition as sr
+    logger.debug("Successfully imported speech_recognition")
+except ImportError as e:
+    logger.critical(f"Failed to import speech_recognition: {e}. Please run setup.py.")
+    DEPENDENCIES_INSTALLED = False
+
+try:
+    import pyaudio
+    logger.debug("Successfully imported pyaudio")
+except ImportError as e:
+    logger.warning(f"Failed to import pyaudio: {e}. Microphone input might fail.")
 
 
-# Socket server configuration
-HOST = '127.0.0.1'  # Standard loopback interface address (localhost)
-PORT = 65432        # Port to listen on (non-privileged ports are > 1023)
+# Exit if core dependencies are missing
+if not DEPENDENCIES_INSTALLED:
+     logger.critical("Core dependencies missing. Exiting server.")
+     sys.exit(1)
 
-# Flag to signal the server to stop
+
+# --- Server Configuration ---
+HOST = '127.0.0.1'
+PORT = 65432
 stop_server = threading.Event()
+pending_context_requests = {} # request_id -> {data}
+client_configs = {} # conn -> {model_name, method} - NO model instance stored
+
+# --- Helper Functions ---
 
 def format_blender_context(context_data):
-    """Formats the received Blender context dictionary into a string for the prompt."""
+    """Formats the rich context data into a readable string for the AI prompt."""
     if not context_data:
         return "No Blender context provided."
 
-    mode = context_data.get('mode', 'UNKNOWN')
-    active = context_data.get('active_object', 'None')
-    selected = context_data.get('selected_objects', [])
+    parts = []
+    parts.append(f"Scene: {context_data.get('scene_name', 'N/A')}")
+    parts.append(f"Mode: {context_data.get('mode', 'UNKNOWN')}")
 
-    # Create a concise string representation
-    context_str = f"Current Blender context: Mode={mode}, Active Object={active}, Selected Objects={selected}"
-    return context_str
+    active_obj = context_data.get('active_object')
+    if active_obj:
+        active_str = f"Active Object: {active_obj.get('name', 'N/A')} (Type: {active_obj.get('type', 'N/A')}, " \
+                     f"Loc: {active_obj.get('location')}, Rot: {active_obj.get('rotation_euler')}, Scale: {active_obj.get('scale')})"
+        parts.append(active_str)
+    else:
+        parts.append("Active Object: None")
 
-# Updated for google.generativeai SDK usage
-def process_text_with_gemini(client: genai.GenerativeModel, text: str, model_name: str, blender_context: dict = None):
-    """Process transcribed text with Gemini API, using Blender context."""
-    # Type hint uses genai.GenerativeModel which should now resolve correctly
-    try:
-        logger.debug(f"Processing text with Gemini model: {model_name}")
+    selected_objs = context_data.get('selected_objects', [])
+    if selected_objs:
+        selected_strs = [f"{sel.get('name', 'N/A')} ({sel.get('type', 'N/A')})" for sel in selected_objs]
+        parts.append(f"Selected Objects: [{', '.join(selected_strs)}]")
+    else:
+        parts.append("Selected Objects: []")
 
-        # --- Format Received Context ---
-        context_info = format_blender_context(blender_context)
-        logger.debug(f"Using context: {context_info}") # Context info is not used in the prompt yet, but logged
+    scene_objs = context_data.get('scene_objects', [])
+    if scene_objs:
+        parts.append(f"Other Scene Objects: [{', '.join(scene_objs)}]")
+    else:
+         parts.append("Other Scene Objects: []")
 
-        # --- Revised Prompt Structure ---
-        prompt = f"""
+
+    return "\n".join(parts)
+
+# --- AI Processing Functions (Refactored) ---
+DEFAULT_GENERATION_CONFIG = {
+    "temperature": 0.2,
+    "top_p": 0.8,
+    "top_k": 40,
+    "max_output_tokens": 2048,
+}
+DEFAULT_SAFETY_SETTINGS = [
+    {'category': 'HARM_CATEGORY_HARASSMENT', 'threshold': 'BLOCK_MEDIUM_AND_ABOVE'},
+    {'category': 'HARM_CATEGORY_HATE_SPEECH', 'threshold': 'BLOCK_MEDIUM_AND_ABOVE'},
+    {'category': 'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'threshold': 'BLOCK_MEDIUM_AND_ABOVE'},
+    {'category': 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold': 'BLOCK_MEDIUM_AND_ABOVE'},
+]
+
+def process_text_with_gemini(text: str, model_name: str, blender_context: dict = None):
+    """Initializes model and processes text with Gemini, passing configs to generate_content."""
+    logger.debug(f"[Text] Processing with Gemini model: {model_name}")
+    if 'google.generativeai' not in sys.modules:
+        logger.error("[Text] google.generativeai module not available.")
+        return None
+
+    context_info = format_blender_context(blender_context)
+    # logger.debug(f"[Text] Using context: {context_info}") # Included in prompt
+
+    prompt = f"""
 You are a Blender 4.x Python script generator.
 Translate the following command into a `bpy` Python script compatible with Blender 4.x.
 
@@ -139,169 +218,68 @@ Translate the following command into a `bpy` Python script compatible with Blend
     `# Error: Command cannot be processed.`
 
 **Command:** {text}
+{context_info}
 
 **Script:**
 """
-        # logger.debug(f"Sending prompt to Gemini:\n{prompt}") # Log the full prompt for debugging
 
-        # Configure generation settings as a dictionary
-        generation_config = {
-            "temperature": 0.2,
-            "top_p": 0.8,
-            "top_k": 40,
-            "max_output_tokens": 2048,
-        }
+    try:
+        logger.debug(f"[Text] Initializing GenerativeModel: {model_name}")
+        model = genai.GenerativeModel(model_name)
+        logger.debug(f"[Text] Model initialized: {type(model)}")
 
-        # Configure safety settings using genai.types
-        # Use dictionary format consistent with client_message_handler_thread
-        safety_settings = [
-            {'category': 'HARM_CATEGORY_HARASSMENT', 'threshold': 'BLOCK_MEDIUM_AND_ABOVE'},
-            {'category': 'HARM_CATEGORY_HATE_SPEECH', 'threshold': 'BLOCK_MEDIUM_AND_ABOVE'},
-            {'category': 'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'threshold': 'BLOCK_MEDIUM_AND_ABOVE'},
-            {'category': 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold': 'BLOCK_MEDIUM_AND_ABOVE'},
-        ]
-
-        # --- Debug Logging before Text API Call ---
-        logger.debug(f"[Text] Attempting generate_content for model: {model_name}")
-        logger.debug(f"[Text] Client object type: {type(client)}")
-        logger.debug(f"[Text] Contents type: {type(prompt)}")
-        # logger.debug(f"[Text] Contents value:\n{prompt}") # Avoid logging potentially large prompts unless necessary
-        logger.debug(f"[Text] Generation config type: {type(generation_config)}")
-        logger.debug(f"[Text] Generation config value: {generation_config}")
-        logger.debug(f"[Text] Safety settings type: {type(safety_settings)}")
-        logger.debug(f"[Text] Safety settings value: {safety_settings}")
-        # --- End Debug Logging ---
-
-        # Generate the response using the provided client instance (GenerativeModel)
-        # Configs are now passed during model initialization for this library version
-        response = client.generate_content(
-            contents=prompt
+        logger.debug(f"[Text] Calling generate_content with configs...")
+        response = model.generate_content(
+            contents=prompt,
+            generation_config=DEFAULT_GENERATION_CONFIG,
+            safety_settings=DEFAULT_SAFETY_SETTINGS
         )
+        logger.debug(f"[Text] generate_content response received.")
 
-        # Extract the script from the response
         script = ""
-        if response.parts:
-            script = response.parts[0].text.strip()
-        elif hasattr(response, 'text'): # Check for direct text attribute as fallback
-             script = response.text.strip()
+        if hasattr(response, 'parts') and response.parts:
+            # Check if text attribute exists before accessing
+            if hasattr(response.parts[0], 'text'):
+                 script = response.parts[0].text.strip()
+            else:
+                 logger.warning("[Text] Response part exists but has no 'text' attribute.")
+        elif hasattr(response, 'text'):
+            script = response.text.strip()
         else:
-            logger.warning("[Text] Gemini response did not contain expected text part.")
-            if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
-                 logger.warning(f"[Text] Gemini request blocked: {response.prompt_feedback.block_reason}")
+            logger.warning("[Text] Gemini response has no 'parts' or 'text'. Checking feedback.")
+            if hasattr(response, 'prompt_feedback') and hasattr(response.prompt_feedback, 'block_reason'):
+                block_reason = response.prompt_feedback.block_reason
+                safety_ratings = response.prompt_feedback.safety_ratings
+                logger.warning(f"[Text] Request blocked: {block_reason}. Ratings: {safety_ratings}")
+                script = f"# Error: Content blocked by API ({block_reason})"
+            else:
+                logger.warning(f"[Text] Unknown response structure: {response}")
+                script = "# Error: Could not parse Gemini response."
 
-        logger.info("[Text] Received script from Gemini.")
-        # logger.debug(f"[Text] Generated Script Snippet: {script[:100]}...") # Log snippet
+        # Stricter validation: Check for None, empty/whitespace-only, or containing '# Error:'
+        if not script or not script.strip() or "# Error:" in script:
+             logger.warning(f"[Text] Gemini returned an invalid/error script: '{script}'")
+             return None # Explicitly return None for invalid scripts
 
+        logger.info("[Text] Received valid (non-error, non-empty) script from Gemini.")
         return script
+
     except Exception as e:
-        logger.error(f"Error processing text with Gemini: {e}", exc_info=True) # Log traceback
-        return None # Return None on error
-
-# --- New Processing Functions ---
-
-# Global cache for Whisper model
-whisper_model_cache = {}
-
-def transcribe_with_whisper(audio_bytes: bytes) -> str | None:
-    """Transcribe audio using OpenAI Whisper."""
-    global whisper_model_cache
-    
-    model_name = "small" # Using 'base' model as decided
-    try:
-        if model_name not in whisper_model_cache:
-            logger.info(f"Loading Whisper model: {model_name}...")
-            whisper_model_cache[model_name] = whisper.load_model(model_name)
-            logger.info("Whisper model loaded.")
-
-        model = whisper_model_cache[model_name]
-
-        # --- Use temporary file within project directory ---
-        tmp_file_path = None # Initialize path variable
-        try:
-            # Define and ensure the temp audio directory exists within the addon
-            addon_dir = Path(__file__).parent.parent # Go up two levels from src/
-            temp_audio_dir = addon_dir / "temp_audio"
-            os.makedirs(temp_audio_dir, exist_ok=True)
-            logger.debug(f"Ensured temp audio directory exists: {temp_audio_dir}")
-
-            # Use NamedTemporaryFile within the project's temp_audio directory
-            # Set delete=False initially, we will manually delete in finally block
-            with tempfile.NamedTemporaryFile(dir=temp_audio_dir, suffix=".wav", delete=False) as tmp_file:
-                tmp_file_path = tmp_file.name # Store the path
-                # Assuming audio_bytes is already in WAV format
-                tmp_file.write(audio_bytes)
-                # File handle is automatically closed when exiting 'with' block
-
-            logger.debug(f"Created temporary WAV file: {tmp_file_path}")
-
-            # Transcribe using the file path (file is now closed)
-            logger.debug(f"Transcribing with Whisper using temp file path: {tmp_file_path}")
-            result = model.transcribe(tmp_file_path)
-            text = result.get("text", "").strip()
-            logger.info(f"Whisper transcription result: {text}")
-            return text
-
-        except Exception as e:
-            # Catch errors during transcription processing
-            logger.error(f"Error during Whisper transcription processing step: {e}", exc_info=True)
-            if isinstance(e, RuntimeError) and "ffmpeg" in str(e).lower():
-                 logger.error("This might be an ffmpeg issue. Ensure ffmpeg is installed, in PATH, and can access the temp file.")
-            return None
-        finally:
-            # Ensure temporary file is deleted even if transcription fails
-            if tmp_file_path and os.path.exists(tmp_file_path):
-                try:
-                    os.remove(tmp_file_path)
-                    logger.debug(f"Deleted temporary file: {tmp_file_path}")
-                except OSError as e_del:
-                    logger.error(f"Error deleting temporary file {tmp_file_path}: {e_del}")
-
-    # Catch errors during model loading or initial setup
-    except Exception as e:
-        logger.error(f"Error setting up Whisper transcription (model loading?): {e}", exc_info=True)
+        logger.error(f"[Text] Error during Gemini API call or processing for model '{model_name}': {type(e).__name__} - {e}", exc_info=True)
         return None
 
 
-def transcribe_with_google_stt(audio_bytes: bytes, sample_rate: int = 16000) -> str | None:
-    """Transcribe audio using Google Cloud Speech-to-Text."""
-    try:
-        logger.info("Transcribing with Google Cloud STT...")
-        # Requires GOOGLE_APPLICATION_CREDENTIALS env var to be set
-        client = speech.SpeechClient()
-
-        # Assuming LINEAR16 encoding, common for WAV
-        audio = speech.RecognitionAudio(content=audio_bytes)
-        config = speech.RecognitionConfig(
-            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-            sample_rate_hertz=sample_rate, # Get sample rate from client if possible
-            language_code="en-US", # Make configurable?
-        )
-
-        response = client.recognize(config=config, audio=audio)
-
-        if not response.results:
-            logger.warning("Google Cloud STT returned no results.")
-            return None
-
-        transcript = "".join(result.alternatives[0].transcript for result in response.results if result.alternatives)
-        logger.info(f"Google Cloud STT transcription result: {transcript}")
-        return transcript
-
-    except Exception as e:
-        logger.error(f"Error during Google Cloud STT transcription: {e}", exc_info=True)
+def process_audio_with_gemini(audio_bytes: bytes, model_name: str, blender_context: dict = None, mime_type: str = "audio/wav") -> str | None:
+    """Initializes model and processes audio with Gemini, passing configs to generate_content."""
+    logger.debug(f"[Audio] Processing with Gemini model: {model_name}")
+    if 'google.generativeai' not in sys.modules:
+        logger.error("[Audio] google.generativeai module not available.")
         return None
 
-def process_audio_with_gemini(client: genai.GenerativeModel, audio_bytes: bytes, model_name: str, blender_context: dict = None, mime_type: str = "audio/wav") -> str | None:
-    """Process audio directly with Gemini API, using Blender context."""
-    # Type hint uses genai.GenerativeModel
-    try:
-        logger.debug(f"Processing audio directly with Gemini model: {model_name}")
+    context_info = format_blender_context(blender_context)
+    # logger.debug(f"[Audio] Using context: {context_info}") # Included in prompt
 
-        context_info = format_blender_context(blender_context)
-        logger.debug(f"Using context: {context_info}")
-
-        # --- Prompt for Audio Input ---
-        prompt = f"""
+    prompt = f"""
 You are a Blender 4.x Python script generator.
 Listen to the following audio command and translate it into a `bpy` Python script compatible with Blender 4.x.
 
@@ -311,540 +289,673 @@ Listen to the following audio command and translate it into a `bpy` Python scrip
 3.  **Handle Errors:** If the command is unclear, too complex to translate reliably, or potentially unsafe, output ONLY the following line:
     `# Error: Command cannot be processed.`
 
+{context_info}
+
 **Script:**
 """
-        # logger.debug(f"Sending audio prompt to Gemini:\n{prompt}")
 
-        # Prepare audio data using genai.types
-        # Use Part.from_data for modern SDK versions
-        audio_part = genai.types.Part.from_data(data=audio_bytes, mime_type=mime_type)
-
-        # Configure generation settings as a dictionary
-        generation_config = { # Renamed from generation_config_obj
-            "temperature": 0.2, # May need different tuning for audio
-            "top_p": 0.8,
-            "top_k": 40,
-            "max_output_tokens": 2048,
-        }
-        # Configure safety settings using genai.types
-        # Use dictionary format consistent with client_message_handler_thread
-        safety_settings_list = [
-            {'category': 'HARM_CATEGORY_HARASSMENT', 'threshold': 'BLOCK_MEDIUM_AND_ABOVE'},
-            {'category': 'HARM_CATEGORY_HATE_SPEECH', 'threshold': 'BLOCK_MEDIUM_AND_ABOVE'},
-            {'category': 'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'threshold': 'BLOCK_MEDIUM_AND_ABOVE'},
-            {'category': 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold': 'BLOCK_MEDIUM_AND_ABOVE'},
-        ]
-
-        # --- Start Detailed Debug Logging ---
-        logger.debug(f"[Audio] Attempting generate_content for model: {model_name}")
-        logger.debug(f"[Audio] Client object type: {type(client)}")
-        # Prepare contents list for logging and the actual call
-        contents_list = [prompt, audio_part]
-        try:
-             logger.debug(f"[Audio] Contents type: {type(contents_list)}")
-             logger.debug(f"[Audio] Contents length: {len(contents_list)}")
-             logger.debug(f"[Audio]   Prompt type: {type(contents_list[0])}")
-             logger.debug(f"[Audio]   Audio part type: {type(contents_list[1])}")
-             # Avoid logging full audio bytes, log size instead
-             if hasattr(contents_list[1], 'data'):
-                 logger.debug(f"[Audio]   Audio data size: {len(contents_list[1].data)} bytes")
-                 logger.debug(f"[Audio]   Audio mime_type: {contents_list[1].mime_type}")
-             else:
-                 # This case shouldn't happen if using Part.from_data correctly
-                 logger.warning("[Audio]   Audio part doesn't have 'data' attribute as expected.")
-        except Exception as log_e:
-             logger.error(f"[Audio] Error logging contents details: {log_e}")
-
-        logger.debug(f"[Audio] Generation config type: {type(generation_config)}")
-        logger.debug(f"[Audio] Generation config value: {generation_config}")
-        logger.debug(f"[Audio] Safety settings type: {type(safety_settings_list)}")
-        logger.debug(f"[Audio] Safety settings value: {safety_settings_list}")
-        # --- End Detailed Debug Logging ---
-
-        # Pass generation_config and safety_settings directly as keyword arguments
-        # Use the contents_list prepared above
-        # Configs are now passed during model initialization for this library version
-        response = client.generate_content(
-            contents=contents_list      # List contains text prompt and audio data part
-        )
-
-        # Check if response has text part before accessing .text
-        script = ""
-        if response.parts:
-            script = response.parts[0].text.strip() # Assuming the script is in the first part
-        elif hasattr(response, 'text'): # Check for direct text attribute as fallback
-             script = response.text.strip()
+    try:
+        audio_part = None
+        if hasattr(genai, 'types') and hasattr(genai.types, 'Part'):
+            logger.debug("[Audio] Using genai.types.Part for audio.")
+            audio_part = genai.types.Part.from_data(data=audio_bytes, mime_type=mime_type)
         else:
-            logger.warning("[Audio] Gemini response did not contain expected text part.")
-            if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
-                 logger.warning(f"[Audio] Gemini request blocked: {response.prompt_feedback.block_reason}")
+            logger.warning("[Audio] genai.types.Part not found. Using dictionary format for audio.")
+            # Most APIs expect data as base64 in JSON payloads
+            audio_part = {"mime_type": mime_type, "data": base64.b64encode(audio_bytes).decode('utf-8')}
 
-        logger.info("[Audio] Received script from Gemini.")
-        # logger.debug(f"[Audio] Generated Script Snippet: {script[:100]}...")
+        if not audio_part:
+             logger.error("[Audio] Failed to create audio part for Gemini.")
+             return None
+
+        contents_list = [prompt, audio_part]
+
+        logger.debug(f"[Audio] Initializing GenerativeModel: {model_name}")
+        model = genai.GenerativeModel(model_name)
+        logger.debug(f"[Audio] Model initialized: {type(model)}")
+
+        logger.debug(f"[Audio] Calling generate_content with configs...")
+        response = model.generate_content(
+            contents=contents_list,
+            generation_config=DEFAULT_GENERATION_CONFIG,
+            safety_settings=DEFAULT_SAFETY_SETTINGS
+        )
+        logger.debug(f"[Audio] generate_content response received.")
+
+        script = ""
+        if hasattr(response, 'parts') and response.parts:
+            if hasattr(response.parts[0], 'text'):
+                 script = response.parts[0].text.strip()
+            else:
+                 logger.warning("[Audio] Response part exists but has no 'text' attribute.")
+        elif hasattr(response, 'text'):
+            script = response.text.strip()
+        else:
+            logger.warning("[Audio] Gemini response has no 'parts' or 'text'. Checking feedback.")
+            if hasattr(response, 'prompt_feedback') and hasattr(response.prompt_feedback, 'block_reason'):
+                block_reason = response.prompt_feedback.block_reason
+                safety_ratings = response.prompt_feedback.safety_ratings
+                logger.warning(f"[Audio] Request blocked: {block_reason}. Ratings: {safety_ratings}")
+                script = f"# Error: Content blocked by API ({block_reason})"
+            else:
+                logger.warning(f"[Audio] Unknown response structure: {response}")
+                script = "# Error: Could not parse Gemini response."
+
+        # Stricter validation: Check for None, empty/whitespace-only, or containing '# Error:'
+        if not script or not script.strip() or "# Error:" in script:
+             logger.warning(f"[Audio] Gemini returned an invalid/error script: '{script}'")
+             return None # Explicitly return None for invalid scripts
+
+        logger.info("[Audio] Received valid (non-error, non-empty) script from Gemini.")
         return script
 
     except Exception as e:
-        logger.error(f"Error processing audio with Gemini: {e}", exc_info=True)
+        logger.error(f"[Audio] Error during Gemini API call or processing for model '{model_name}': {type(e).__name__} - {e}", exc_info=True)
         return None
 
-# --- End New Processing Functions ---
 
-# Dictionary to hold data while waiting for context response from client
-pending_context_requests = {}
-# Dictionary to hold client configuration per connection
-client_configs = {} # Stores {'model_name': str, 'method': str, 'genai_model_instance': genai.GenerativeModel | None}
+# --- Transcription Functions ---
+whisper_model_cache = {}
 
-# Thread function for server-side audio listening
-def server_audio_listener_thread(conn, addr):
-    """Thread function to handle continuous voice recognition from server mic."""
+def transcribe_with_whisper(audio_bytes: bytes) -> str | None:
+    """Transcribe audio using OpenAI Whisper (small model)."""
+    global whisper_model_cache
+    if 'whisper' not in sys.modules:
+        logger.error("[Whisper] Whisper library not available.")
+        return None
+
+    model_name = "small"
+    try:
+        if model_name not in whisper_model_cache:
+            logger.info(f"[Whisper] Loading Whisper model: {model_name}...")
+            whisper_model_cache[model_name] = whisper.load_model(model_name)
+            logger.info(f"[Whisper] Model '{model_name}' loaded.")
+
+        model = whisper_model_cache[model_name]
+        if not model:
+             logger.error(f"[Whisper] Model object for '{model_name}' is invalid after loading attempt.")
+             return None
+
+        tmp_file_path = None
+        try:
+            addon_dir = Path(__file__).parent.parent
+            temp_audio_dir = addon_dir / "temp_audio"
+            temp_audio_dir.mkdir(exist_ok=True)
+
+            with tempfile.NamedTemporaryFile(dir=temp_audio_dir, suffix=".wav", delete=False) as tmp_file:
+                tmp_file_path = tmp_file.name
+                tmp_file.write(audio_bytes)
+
+            logger.debug(f"[Whisper] Transcribing temporary file: {tmp_file_path}")
+            result = model.transcribe(tmp_file_path, fp16=False)
+            text = result.get("text", "").strip()
+            logger.info(f"[Whisper] Transcription result: '{text}'")
+            return text
+
+        except Exception as e:
+            logger.error(f"[Whisper] Error during transcription processing: {e}", exc_info=True)
+            if isinstance(e, RuntimeError) and "ffmpeg" in str(e).lower():
+                 logger.error("[Whisper] This might be an ffmpeg issue. Ensure ffmpeg is installed and in PATH.")
+            return None
+        finally:
+            if tmp_file_path and os.path.exists(tmp_file_path):
+                try: os.remove(tmp_file_path)
+                except OSError as e_del: logger.error(f"[Whisper] Error deleting temp file {tmp_file_path}: {e_del}")
+
+    except Exception as e:
+        logger.error(f"[Whisper] Error setting up Whisper transcription (model loading?): {e}", exc_info=True)
+        return None
+
+
+def transcribe_with_google_stt(audio_bytes: bytes, sample_rate: int = 16000) -> str | None:
+    """Transcribe audio using Google Cloud Speech-to-Text."""
+    if 'google.cloud.speech' not in sys.modules:
+         logger.warning("[Google STT] Google Cloud Speech library not available.")
+         return None
+
+    try:
+        logger.info("[Google STT] Transcribing with Google Cloud STT...")
+        credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        client = None
+        if not credentials_path:
+             logger.warning("[Google STT] GOOGLE_APPLICATION_CREDENTIALS not set. Attempting default authentication.")
+             client = speech.SpeechClient()
+        else:
+             if Path(credentials_path).is_file():
+                 logger.debug(f"[Google STT] Using credentials from: {credentials_path}")
+                 client = speech.SpeechClient.from_service_account_file(credentials_path)
+             else:
+                 logger.error(f"[Google STT] Credentials file not found at: {credentials_path}")
+                 return None
+
+        if not client: # Should not happen if above logic is correct, but check anyway
+            logger.error("[Google STT] Failed to initialize SpeechClient.")
+            return None
+
+        audio = speech.RecognitionAudio(content=audio_bytes)
+        config = speech.RecognitionConfig(
+            encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+            sample_rate_hertz=sample_rate,
+            language_code="en-US",
+        )
+
+        response = client.recognize(config=config, audio=audio)
+
+        if not response.results or not response.results[0].alternatives:
+            logger.warning("[Google STT] Received no transcription results.")
+            return None
+
+        transcript = response.results[0].alternatives[0].transcript.strip()
+        logger.info(f"[Google STT] Transcription result: '{transcript}'")
+        return transcript
+
+    except Exception as e:
+        logger.error(f"[Google STT] Error during Google Cloud STT transcription: {e}", exc_info=True)
+        return None
+
+# --- Server Threads ---
+
+def server_audio_listener_thread(conn: socket.socket, addr):
+    """Handles audio capture using SpeechRecognition and sends for processing."""
     logger.info(f"[{addr}] Audio listener thread started.")
+    if 'speech_recognition' not in sys.modules:
+        logger.error(f"[{addr}] SpeechRecognition library not available. Listener thread stopping.")
+        return
+
     recognizer = sr.Recognizer()
-    mic_index = None # Use default microphone
+    recognizer.pause_threshold = 0.8
+    recognizer.energy_threshold = 300
+    mic_index = None
 
     try:
         with sr.Microphone(device_index=mic_index) as source:
-            logger.info(f"[{addr}] Adjusting for ambient noise...")
-            try:
-                conn.sendall(json.dumps({"status": "info", "message": "Adjusting for ambient noise..."}).encode())
-            except socket.error as send_err:
-                 logger.warning(f"[{addr}] Failed to send 'adjusting noise' status: {send_err}")
+            logger.info(f"[{addr}] Microphone opened. Adjusting for ambient noise (1s)...")
+            # Check connection before sending status
+            if is_socket_connected(conn):
+                try: conn.sendall(json.dumps({"status": "info", "message": "Adjusting for ambient noise..."}).encode())
+                except socket.error as send_err:
+                     logger.warning(f"[{addr}] Failed to send 'adjusting noise' status: {send_err}")
+                     # If send fails, re-check connection and return if closed
+                     if not is_socket_connected(conn): return
+            else:
+                logger.warning(f"[{addr}] Socket closed before sending 'adjusting noise' status. Aborting listener.")
+                return # Exit thread if socket is already closed
 
             recognizer.adjust_for_ambient_noise(source, duration=1)
-            logger.info(f"[{addr}] Ready to listen.")
-            try:
-                conn.sendall(json.dumps({"status": "info", "message": "Listening..."}).encode())
-            except socket.error as send_err:
-                 logger.warning(f"[{addr}] Failed to send 'listening' status: {send_err}")
+            logger.info(f"[{addr}] Noise adjustment complete. Energy threshold: {recognizer.energy_threshold:.2f}. Ready to listen.")
+            # Check connection before sending status
+            if is_socket_connected(conn):
+                try: conn.sendall(json.dumps({"status": "info", "message": "Listening..."}).encode())
+                except socket.error as send_err:
+                     logger.warning(f"[{addr}] Failed to send 'listening' status: {send_err}")
+                     # If send fails, re-check connection and return if closed
+                     if not is_socket_connected(conn): return
+            else:
+                logger.warning(f"[{addr}] Socket closed before sending 'listening' status. Aborting listener.")
+                return # Exit thread if socket is already closed
 
-
-            while not stop_server.is_set():
-                if conn.fileno() == -1: # Check if socket is closed
-                    logger.warning(f"[{addr}] Connection closed in listener loop.")
-                    break
-
+            while not stop_server.is_set() and is_socket_connected(conn):
                 if conn not in client_configs:
-                    # logger.debug(f"[{addr}] No configuration received yet. Waiting...") # Reduce log noise
-                    time.sleep(1)
+                    time.sleep(0.5)
                     continue
 
                 try:
-                    config = client_configs[conn].copy()
-                except KeyError:
-                    logger.warning(f"[{addr}] Config removed unexpectedly. Waiting...")
-                    time.sleep(1)
-                    continue
+                    audio = recognizer.listen(source, timeout=5, phrase_time_limit=15)
+                    logger.info(f"[{addr}] Audio detected.")
 
-                current_model_name = config.get('model_name', 'gemini-2.0-flash') # Use updated default
-                current_method = config.get('method', 'whisper') # Default if not set
+                    if stop_server.is_set() or not is_socket_connected(conn): break
 
-                try:
-                    # logger.debug(f"[{addr}] Listening for audio...") # Reduce log noise
-                    audio = recognizer.listen(source, timeout=2, phrase_time_limit=10) # Shorter timeout
+                    try:
+                         config = client_configs[conn]
+                         current_method = config.get('method', 'whisper')
+                         current_model = config.get('model_name', ' 2.0-flash')
+                    except KeyError:
+                         logger.warning(f"[{addr}] Configuration missing for connection during audio processing. Skipping.")
+                         continue
 
-                    if stop_server.is_set(): break
+                    logger.info(f"[{addr}] Processing detected audio using method: {current_method}")
+                    audio_bytes = audio.get_wav_data()
 
-                    logger.info(f"[{addr}] Audio detected, processing with method: {current_method}")
-                    audio_bytes = audio.get_wav_data() # Get raw WAV data
+                    # --- Add audio saving ---
+                    try:
+                        timestamp = time.strftime("%Y%m%d_%H%M%S")
+                        unique_id = str(uuid.uuid4())[:8]
+                        filename = f"captured_audio_{timestamp}_{unique_id}.wav"
+                        save_dir = Path(__file__).parent.parent / "temp_audio"
+                        save_dir.mkdir(exist_ok=True) # Ensure dir exists
+                        save_path = save_dir / filename
+                        with open(save_path, 'wb') as wf:
+                            wf.write(audio_bytes)
+                        logger.info(f"[{addr}] Saved captured audio to: {save_path}")
+                    except Exception as save_err:
+                        logger.error(f"[{addr}] Failed to save captured audio: {save_err}", exc_info=True)
+                    # --- End audio saving ---
+
                     request_id = str(uuid.uuid4())
                     text_result = None
                     audio_to_process = None
+                    message_to_client = "Processing..."
 
                     if current_method == "gemini":
                         audio_to_process = audio_bytes
-                        message_to_client = "Processing audio..."
+                        message_to_client = "Processing audio with Gemini..."
                     elif current_method == "whisper":
                         text_result = transcribe_with_whisper(audio_bytes)
                         message_to_client = f"Transcribed (Whisper): {text_result}" if text_result else "Whisper transcription failed."
                     elif current_method == "google_stt":
-                        text_result = transcribe_with_google_stt(audio_bytes)
+                        text_result = transcribe_with_google_stt(audio_bytes, sample_rate=audio.sample_rate)
                         message_to_client = f"Transcribed (Google STT): {text_result}" if text_result else "Google STT transcription failed."
                     else:
-                        logger.error(f"[{addr}] Unknown audio method: {current_method}")
-                        continue # Skip processing
+                        logger.error(f"[{addr}] Unknown audio method configured: {current_method}")
+                        try: conn.sendall(json.dumps({"status": "error", "message": f"Unknown audio method: {current_method}"}).encode())
+                        except: pass
+                        continue
 
-                    pending_context_requests[request_id] = {
-                        'audio_bytes': audio_to_process,
-                        'text': text_result,
-                        'model_name': current_model_name,
-                        'method': current_method,
-                        'conn': conn,
-                        'addr': addr
-                    }
-                    logger.debug(f"[{addr}] Stored pending request {request_id} for method {current_method}")
+                    # Store pending request only if transcription/selection was successful (or if using direct audio)
+                    if text_result is not None or audio_to_process is not None:
+                         pending_context_requests[request_id] = {
+                             'audio_bytes': audio_to_process,
+                             'text': text_result,
+                             'model_name': current_model,
+                             'method': current_method,
+                             'conn': conn,
+                             'addr': addr
+                         }
+                         logger.debug(f"[{addr}] Stored pending request {request_id} (Method: {current_method})")
 
-                    try:
-                        conn.sendall(json.dumps({
-                            "status": "request_context",
-                            "request_id": request_id,
-                            "message": message_to_client
-                        }).encode())
-                        logger.debug(f"[{addr}] Sent context request {request_id} to client.")
-                    except socket.error as send_err:
-                        logger.error(f"[{addr}] Failed to send context request {request_id}: {send_err}")
-                        if request_id in pending_context_requests:
-                            del pending_context_requests[request_id]
+                         try:
+                             conn.sendall(json.dumps({
+                                 "status": "request_context",
+                                 "request_id": request_id,
+                                 "message": message_to_client
+                             }).encode())
+                             logger.debug(f"[{addr}] Sent context request {request_id} to client.")
+                         except socket.error as send_err:
+                             logger.error(f"[{addr}] Failed to send context request {request_id}: {send_err}")
+                             if request_id in pending_context_requests:
+                                 del pending_context_requests[request_id]
+                    else:
+                         logger.warning(f"[{addr}] No text or audio obtained for method {current_method}. Cannot proceed with request.")
+                         # Send feedback to client?
+                         try: conn.sendall(json.dumps({"status": "error", "message": f"Failed to get input via {current_method}."}).encode())
+                         except: pass
 
-                except sr.WaitTimeoutError:
-                    # logger.debug(f"[{addr}] Listen timeout, continuing...") # Reduce log noise
-                    pass # Normal timeout, continue loop
-                except Exception as e:
-                    logger.error(f"[{addr}] Error in listening loop: {e}", exc_info=True)
-                    try: conn.sendall(json.dumps({"status": "error", "message": f"Listener error: {e}"}).encode())
+
+                except sr.WaitTimeoutError: pass # Normal timeout
+                except sr.RequestError as e:
+                    logger.error(f"[{addr}] SpeechRecognition API RequestError: {e}")
+                    try: conn.sendall(json.dumps({"status": "error", "message": f"Speech Recognition API error: {e}"}).encode())
                     except: pass
-                    time.sleep(1) # Avoid tight loop on persistent error
+                except Exception as e:
+                    logger.error(f"[{addr}] Error in audio listening loop: {type(e).__name__} - {e}", exc_info=True)
+                    try: conn.sendall(json.dumps({"status": "error", "message": f"Listener loop error: {e}"}).encode())
+                    except: pass
+                    time.sleep(1)
 
     except sr.RequestError as e:
-        logger.error(f"[{addr}] Speech Recognition API request failed: {e}")
-        try: conn.sendall(json.dumps({"status": "error", "message": f"Speech Recognition API error: {e}"}).encode())
+        logger.error(f"[{addr}] SpeechRecognition RequestError during setup: {e}")
+        try: conn.sendall(json.dumps({"status": "error", "message": f"Speech Recognition setup error: {e}"}).encode())
         except: pass
+    except OSError as e:
+         logger.error(f"[{addr}] OS Error initializing microphone (device index {mic_index}?): {e}", exc_info=True)
+         try: conn.sendall(json.dumps({"status": "error", "message": f"Microphone OS error: {e}"}).encode())
+         except: pass
     except Exception as e:
-        logger.error(f"[{addr}] Error initializing microphone or recognizer: {e}", exc_info=True)
-        try: conn.sendall(json.dumps({"status": "error", "message": f"Mic/Recognizer init error: {e}"}).encode())
+        logger.error(f"[{addr}] Error setting up microphone/recognizer: {type(e).__name__} - {e}", exc_info=True)
+        try: conn.sendall(json.dumps({"status": "error", "message": f"Mic/Recognizer setup error: {e}"}).encode())
         except: pass
     finally:
         logger.info(f"[{addr}] Audio listener thread finished.")
-        if conn in client_configs:
-            try:
-                del client_configs[conn]
-            except KeyError:
-                 logger.debug(f"[{addr}] Config already removed for connection.")
 
 
-# Thread function to handle incoming messages from the client
-def client_message_handler_thread(conn, addr, api_key): # Added addr for logging
-    logger.info(f"[{addr}] Client message handler thread started.")
-    try:
-        # Configure the genai library globally with the API key
+def client_message_handler_thread(conn: socket.socket, addr):
+    """Handles messages received from a specific client connection."""
+    logger.info(f"[{addr}] Message handler thread started (Version: {CODE_VERSION}).")
+
+    try: conn.sendall(json.dumps({"status": "ready", "message": "Server ready and connected."}).encode())
+    except socket.error as send_err:
+        logger.warning(f"[{addr}] Failed to send initial ready message: {send_err}")
+
+    # Rely on recv/send errors to detect disconnection within the loop
+    while not stop_server.is_set():
+        # logger.debug(f"[{addr}] Handler loop iteration start.") # Removed noisy log
         try:
-            genai.configure(api_key=api_key)
-            logger.info(f"[{addr}] genai library configured with API key.")
-            # Send ready message
-            conn.sendall(json.dumps({"status": "ready", "message": "Server ready and connected."}).encode())
-        except Exception as e:
-            logger.error(f"[{addr}] Failed to configure genai library: {e}", exc_info=True)
+            # logger.debug(f"[{addr}] Setting socket timeout and attempting recv...") # Removed noisy log
+            conn.settimeout(0.5)
+            client_data = conn.recv(8192)
+            if not client_data:
+                logger.info(f"[{addr}] Client disconnected (recv returned empty).")
+                # --- Start Cleanup ---
+                logger.info(f"[{addr}] Performing cleanup for handler thread due to empty recv.")
+                if conn in client_configs:
+                    try: del client_configs[conn]
+                    except KeyError: pass
+                    logger.debug(f"[{addr}] Removed client config during cleanup.")
+
+                requests_to_remove = [req_id for req_id, data in pending_context_requests.items() if data.get('conn') == conn]
+                for req_id in requests_to_remove:
+                    try: del pending_context_requests[req_id]
+                    except KeyError: pass
+                if requests_to_remove: logger.debug(f"[{addr}] Removed {len(requests_to_remove)} pending context requests during cleanup.")
+
+                close_socket(conn, addr)
+                # --- End Cleanup ---
+                break
+            logger.debug(f"[{addr}] Received {len(client_data)} bytes from client.")
+
             try:
-                conn.sendall(json.dumps({"status": "error", "message": f"Server error: Failed Gemini init: {e}"}).encode())
-            except socket.error: pass # Ignore if cannot send error
-            return # Exit thread if library cannot be configured
+                client_message = json.loads(client_data.decode('utf-8'))
+                logger.debug(f"[{addr}] Received message: {client_message}")
+                msg_type = client_message.get("type")
 
-        while not stop_server.is_set():
-            try:
-                conn.settimeout(0.5)
-                client_data = conn.recv(4096) # Increased buffer size
-                if not client_data:
-                    logger.info(f"[{addr}] Client disconnected.")
-                    break # Exit if client closes connection
-
-                try:
-                    client_message = json.loads(client_data.decode())
-                    logger.debug(f"[{addr}] Received message: {client_message}")
-                    msg_type = client_message.get("type")
-
-                    # --- Handle Configuration ---
-                    if msg_type == "configure":
-                        model_name = client_message.get("model")
-                        method = client_message.get("method")
-                        if model_name and method:
-                            try:
-                                # Define generation and safety settings before initializing model
-                                # Use dictionary format for generation_config
-                                generation_config = {
-                                    "temperature": 0.2,
-                                    "top_p": 0.8,
-                                    "top_k": 40,
-                                    "max_output_tokens":2048,
-                                }
-                                
-                                # Define safety_settings as dictionaries for older library versions
-                                safety_settings = [
-                                    {'category': 'HARM_CATEGORY_HARASSMENT', 'threshold': 'BLOCK_MEDIUM_AND_ABOVE'},
-                                    {'category': 'HARM_CATEGORY_HATE_SPEECH', 'threshold': 'BLOCK_MEDIUM_AND_ABOVE'},
-                                    {'category': 'HARM_CATEGORY_SEXUALLY_EXPLICIT', 'threshold': 'BLOCK_MEDIUM_AND_ABOVE'},
-                                    {'category': 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold': 'BLOCK_MEDIUM_AND_ABOVE'},
-                                ]
-                                logger.debug(f"[{addr}] Defined generation_config: {generation_config}")
-                                logger.debug(f"[{addr}] Defined safety_settings (dict format): {safety_settings}")
-
-                                # Initialize the specific Gemini Model instance using genai, passing configs
-                                logger.debug(f"[{addr}] Attempting to initialize GenerativeModel: {model_name} with configs")
-                                model_instance = genai.GenerativeModel(
-                                    model_name,
-                                    generation_config=generation_config,
-                                    safety_settings=safety_settings
-                                )
-                                logger.info(f"[{addr}] Initialized Gemini Model instance for: {model_name} with specific configs.")
-
-                                # Store config globally associated with the connection object
-                                client_configs[conn] = {
-                                    "model_name": model_name,
-                                    "method": method,
-                                    "genai_model_instance": model_instance # Store the instance
-                                }
-                                logger.info(f"[{addr}] Configured: Model={model_name}, Method={method}")
-                                # Send confirmation back to client
-                                try:
-                                     conn.sendall(json.dumps({"status": "info", "message": f"Configuration received (Model: {model_name}, Method: {method})"}).encode())
-                                except socket.error as send_err:
-                                     logger.warning(f"[{addr}] Failed to send config confirmation: {send_err}")
-
-                            except Exception as model_init_e:
-                                logger.error(f"[{addr}] Failed to initialize Gemini model '{model_name}': {model_init_e}", exc_info=True) # Log traceback
-                                try:
-                                    # Provide more specific error if possible
-                                    error_msg = f"Failed to initialize model '{model_name}'. Check model name and API key permissions."
-                                    conn.sendall(json.dumps({"status": "error", "message": error_msg }).encode())
-                                except socket.error: pass
-                        else:
-                            logger.warning(f"[{addr}] Invalid configuration message: {client_message}")
-
-                    # --- Handle Context Response ---
-                    elif msg_type == "context_response":
-                        request_id = client_message.get("request_id")
-                        received_context = client_message.get("context")
-                        logger.debug(f"[{addr}] Received context response for request {request_id}")
-
-                        if request_id in pending_context_requests:
-                            pending_data = pending_context_requests.pop(request_id) # Remove as we process
-                            script = None
-                            method = pending_data['method']
-                            req_model_name = pending_data['model_name'] # Get model name from pending data
-                            req_conn = pending_data['conn'] # Get the connection associated with the request
-                            req_addr = pending_data['addr']
-
-                            if req_conn != conn:
-                                logger.warning(f"[{addr}] Mismatched connection for request {request_id}. Original: {req_addr}. Ignoring.")
-                                continue
-
-                            connection_config = client_configs.get(req_conn)
-                            if not connection_config or not connection_config.get('genai_model_instance'):
-                                logger.error(f"[{addr}] Could not find valid Gemini model instance for request {request_id}. Config missing or incomplete.")
-                                try:
-                                    conn.sendall(json.dumps({
-                                        "status": "error",
-                                        "message": f"Server configuration error (Request ID: {request_id})",
-                                        "request_id": request_id
-                                    }).encode())
-                                except socket.error: pass
-                                continue # Skip processing this request
-
-                            active_genai_model = connection_config['genai_model_instance']
-                            logger.debug(f"[{addr}] Using model instance {type(active_genai_model)} for request {request_id}")
-
-                            if method == "gemini":
-                                audio_bytes = pending_data.get('audio_bytes')
-                                if audio_bytes:
-                                    # Pass the specific model instance
-                                    script = process_audio_with_gemini(active_genai_model, audio_bytes, req_model_name, received_context)
-                                else:
-                                    logger.error(f"[{addr}] No audio data found for Gemini request {request_id}")
-                            elif method in ["whisper", "google_stt"]:
-                                text = pending_data.get('text')
-                                if text:
-                                    # Pass the specific model instance
-                                    script = process_text_with_gemini(active_genai_model, text, req_model_name, received_context)
-                                else:
-                                     logger.error(f"[{addr}] No transcribed text found for {method} request {request_id}")
-                            else:
-                                logger.error(f"[{addr}] Unknown method '{method}' in pending request {request_id}")
-
-                            # Send script or error back
-                            try:
-                                if script:
-                                    logger.info(f"[{addr}] Script generated successfully for request {request_id}.")
-                                    conn.sendall(json.dumps({
-                                        "status": "script",
-                                        "message": "Generated script",
-                                        "script": script,
-                                        "request_id": request_id
-                                    }).encode())
-                                else:
-                                    logger.warning(f"[{addr}] Failed to generate script for request {request_id}.")
-                                    conn.sendall(json.dumps({
-                                        "status": "error",
-                                        "message": f"Failed to generate script (Request ID: {request_id})",
-                                        "request_id": request_id
-                                    }).encode())
-                            except socket.error as send_err:
-                                logger.error(f"[{addr}] Failed to send script/error for request {request_id}: {send_err}")
-
-                        else:
-                            logger.warning(f"[{addr}] Received context response for unknown/expired request ID: {request_id}")
-
-                    # --- Handle Direct Text Command ---
-                    elif msg_type == "process_text":
-                        text_to_process = client_message.get("text")
-                        context_for_text = client_message.get("context") # Allow context with text input too
-                        request_id_text = str(uuid.uuid4()) # Generate ID for tracking
-
-                        connection_config = client_configs.get(conn)
-                        if text_to_process and connection_config and connection_config.get('genai_model_instance'):
-                            active_genai_model = connection_config['genai_model_instance']
-                            text_model_name = connection_config['model_name']
-                            logger.info(f"[{addr}] Processing direct text command (ID: {request_id_text})...")
-                            script = process_text_with_gemini(active_genai_model, text_to_process, text_model_name, context_for_text)
-
-                            try:
-                                if script:
-                                    logger.info(f"[{addr}] Script generated successfully for text request {request_id_text}.")
-                                    conn.sendall(json.dumps({
-                                        "status": "script",
-                                        "message": "Generated script from text",
-                                        "script": script,
-                                        "request_id": request_id_text
-                                    }).encode())
-                                else:
-                                    logger.warning(f"[{addr}] Failed to generate script for text request {request_id_text}.")
-                                    conn.sendall(json.dumps({
-                                        "status": "error",
-                                        "message": f"Failed to generate script from text (Request ID: {request_id_text})",
-                                        "request_id": request_id_text
-                                    }).encode())
-                            except socket.error as send_err:
-                                logger.error(f"[{addr}] Failed to send script/error for text request {request_id_text}: {send_err}")
-
-                        else:
-                            logger.warning(f"[{addr}] Received invalid 'process_text' request or server not configured: {client_message}")
-                            try:
-                                conn.sendall(json.dumps({
-                                    "status": "error",
-                                    "message": "Invalid text command or server not configured.",
-                                    "request_id": request_id_text
-                                    }).encode())
-                            except socket.error: pass
-
-                    # --- Handle Unknown Message Type ---
+                if msg_type == "configure":
+                    logger.info(f"[{addr}] Processing 'configure' message (Version: {CODE_VERSION}).")
+                    model_name = client_message.get("model")
+                    method = client_message.get("method")
+                    if model_name and method:
+                        client_configs[conn] = {"model_name": model_name, "method": method}
+                        logger.info(f"[{addr}] Client configured: Model={model_name}, Method={method}")
+                        try:
+                            conn.sendall(json.dumps({"status": "info", "message": f"Configuration received (Model: {model_name}, Method: {method})"}).encode())
+                            logger.debug(f"[{addr}] Successfully sent config confirmation.")
+                        except socket.error as send_err:
+                            logger.warning(f"[{addr}] Failed to send config confirmation: {send_err}")
+                            break # Exit loop if sending confirmation fails
+                        logger.debug(f"[{addr}] Finished processing 'configure' message block.") # Log after successful configure processing
                     else:
-                        logger.warning(f"[{addr}] Received unknown message type: {msg_type}")
+                        logger.warning(f"[{addr}] Invalid configuration message received: {client_message}")
+                        try: conn.sendall(json.dumps({"status":"error", "message":"Invalid config message received."}).encode())
+                        except: pass
 
-                except json.JSONDecodeError:
-                    logger.error(f"[{addr}] Failed to decode JSON from client: {client_data}")
-                except UnicodeDecodeError:
-                     logger.error(f"[{addr}] Failed to decode client data as UTF-8: {client_data}")
-                except Exception as msg_proc_err: # Catch broader errors during message processing
-                    logger.error(f"[{addr}] Error processing client message: {msg_proc_err}", exc_info=True)
+                elif msg_type == "context_response":
+                    request_id = client_message.get("request_id")
+                    received_context = client_message.get("context")
+                    logger.debug(f"[{addr}] Received context response for request: {request_id}")
 
-            except socket.timeout:
-                continue # Normal timeout
-            except socket.error as sock_err:
-                logger.error(f"[{addr}] Socket error in message handler: {sock_err}")
-                break # Assume connection is lost
-            except Exception as e:
-                logger.error(f"[{addr}] Unexpected error in message handler loop: {e}", exc_info=True)
-                break # Exit loop on unexpected error
+                    if request_id in pending_context_requests:
+                        pending_data = pending_context_requests.pop(request_id)
 
-    except Exception as thread_err:
-        logger.error(f"[{addr}] Error in client message handler thread: {thread_err}", exc_info=True)
+                        if pending_data.get('conn') != conn:
+                             logger.warning(f"[{addr}] Mismatched connection for context response {request_id}. Ignoring.")
+                             continue
+
+                        script = None
+                        method = pending_data['method']
+                        model_name = pending_data['model_name']
+                        original_text = pending_data.get('text')
+                        audio_bytes = pending_data.get('audio_bytes')
+
+                        if method == "gemini":
+                            if audio_bytes: script = process_audio_with_gemini(audio_bytes, model_name, received_context)
+                            else: logger.error(f"[{addr}] No audio data in pending request {request_id} for Gemini method.")
+                        elif method in ["whisper", "google_stt"]:
+                            if original_text: script = process_text_with_gemini(original_text, model_name, received_context)
+                            else: logger.error(f"[{addr}] No transcribed text in pending request {request_id} for method {method}.")
+                        else:
+                            logger.error(f"[{addr}] Unknown method '{method}' in pending request {request_id}.")
+
+                        # Determine response based on whether a valid script was generated
+                        if script:
+                            response_status = "script"
+                            response_message = "Generated script"
+                             # Log the actual script content (Corrected Indentation)
+                            logger.debug(f"[{addr}] Generated script content for request {request_id}:\n```python\n{script}\n```")
+                        else:
+                            response_status = "error"
+                            response_message = f"Script generation failed (Request ID: {request_id}): Gemini could not process the command or returned an error."
+                            logger.warning(f"[{addr}] Failed to generate valid script for request {request_id}. Original text: '{original_text}'")
+
+                        # Send response block (Corrected Indentation - should be outside the if/else)
+                        try:
+                            # Log before sending
+                            logger.debug(f"[{addr}] Attempting to send {response_status} response for request {request_id}...")
+                            conn.sendall(json.dumps({
+                                "status": response_status, "message": response_message,
+                                "script": script, # Send None if script generation failed
+                                "request_id": request_id,
+                                "original_text": original_text # Essential for history
+                            }).encode())
+                            # Log after successful send
+                            logger.debug(f"[{addr}] Successfully sent {response_status} response for request {request_id}.")
+                        except socket.error as send_err:
+                            logger.error(f"[{addr}] Failed to send {response_status} response for request {request_id}: {send_err}")
+
+                    # This else corresponds to the `if request_id in pending_context_requests:` check
+                    else:
+                        logger.warning(f"[{addr}] Received context response for unknown/expired request ID: {request_id}")
+
+                elif msg_type == "process_text":
+                    text_to_process = client_message.get("text")
+                    context_for_text = client_message.get("context")
+                    request_id_text = str(uuid.uuid4())
+
+                    if conn not in client_configs:
+                         logger.warning(f"[{addr}] Received 'process_text' but client not configured. Ignoring.")
+                         try: conn.sendall(json.dumps({"status":"error", "message":"Client not configured.", "request_id": request_id_text, "original_text": text_to_process}).encode())
+                         except: pass
+                         continue
+
+                    config = client_configs[conn]
+                    model_name = config.get('model_name')
+
+                    if text_to_process and model_name:
+                        logger.info(f"[{addr}] Processing direct text command (ID: {request_id_text})...")
+                        script = process_text_with_gemini(text_to_process, model_name, context_for_text)
+
+                        # Determine response based on whether a valid script was generated
+                        if script:
+                            response_status_text = "script"
+                            response_message_text = "Generated script from text"
+                             # Log the actual script content (Corrected Indentation)
+                            logger.debug(f"[{addr}] Generated script content for text request {request_id_text}:\n```python\n{script}\n```")
+                        else:
+                            response_status_text = "error"
+                            response_message_text = f"Failed to generate script from text (Request ID: {request_id_text}): Gemini could not process the command or returned an error."
+                            logger.warning(f"[{addr}] Failed to generate valid script for text request {request_id_text}. Original text: '{text_to_process}'")
+
+                        # Send response block (Corrected Indentation - should be outside the if/else)
+                        try:
+                             # Log before sending
+                            logger.debug(f"[{addr}] Attempting to send {response_status_text} response for text request {request_id_text}...")
+                            conn.sendall(json.dumps({
+                                "status": response_status_text, "message": response_message_text,
+                                "script": script, # Send None if script generation failed
+                                "request_id": request_id_text,
+                                "original_text": text_to_process # Essential for history
+                            }).encode())
+                            # Log after successful send
+                            logger.debug(f"[{addr}] Successfully sent {response_status_text} response for text request {request_id_text}.")
+                        except socket.error as send_err:
+                            logger.error(f"[{addr}] Failed to send {response_status_text} response for text request {request_id_text}: {send_err}")
+
+                    # This else corresponds to the `if text_to_process and model_name:` check
+                    else:
+                        error_detail = "Missing text command." if not text_to_process else "Model name not configured."
+                        logger.warning(f"[{addr}] Invalid 'process_text' request: {error_detail} - Message: {client_message}")
+                        try: conn.sendall(json.dumps({"status":"error", "message": f"Invalid text command: {error_detail}", "request_id": request_id_text, "original_text": text_to_process}).encode())
+                        except: pass
+
+                else:
+                    logger.warning(f"[{addr}] Received unknown message type: '{msg_type}'")
+                    try: conn.sendall(json.dumps({"status":"error", "message": f"Unknown message type '{msg_type}' received."}).encode())
+                    except: pass
+
+            except json.JSONDecodeError: logger.error(f"[{addr}] Failed to decode JSON from client: {client_data!r}")
+            except UnicodeDecodeError: logger.error(f"[{addr}] Failed to decode client data as UTF-8: {client_data!r}")
+            except Exception as msg_proc_err:
+                logger.error(f"[{addr}] Error processing client message: {type(msg_proc_err).__name__} - {msg_proc_err}", exc_info=True)
+                # Consider breaking here too? Depends on error type. For now, let loop continue/retry.
+
+        except socket.timeout:
+            # logger.debug(f"[{addr}] Socket recv timed out. Continuing loop.") # Removed noisy log
+            continue
+        except (socket.error, ConnectionResetError, BrokenPipeError) as sock_err:
+            logger.warning(f"[{addr}] Socket error in handler loop (client likely disconnected): {type(sock_err).__name__} - {sock_err}")
+            logger.debug(f"[{addr}] Breaking handler loop due to socket error.")
+            # --- Start Cleanup ---
+            logger.info(f"[{addr}] Performing cleanup for handler thread due to socket error.")
+            if conn in client_configs:
+                try: del client_configs[conn]
+                except KeyError: pass
+                logger.debug(f"[{addr}] Removed client config during cleanup.")
+
+            requests_to_remove = [req_id for req_id, data in pending_context_requests.items() if data.get('conn') == conn]
+            for req_id in requests_to_remove:
+                try: del pending_context_requests[req_id]
+                except KeyError: pass
+            if requests_to_remove: logger.debug(f"[{addr}] Removed {len(requests_to_remove)} pending context requests during cleanup.")
+
+            close_socket(conn, addr)
+            # --- End Cleanup ---
+            break
+        except Exception as e:
+            logger.error(f"[{addr}] Unexpected error in message handler loop: {type(e).__name__} - {e}", exc_info=True)
+            logger.debug(f"[{addr}] Breaking handler loop due to unexpected error.")
+            # --- Start Cleanup ---
+            logger.info(f"[{addr}] Performing cleanup for handler thread due to unexpected error.")
+            if conn in client_configs:
+                try: del client_configs[conn]
+                except KeyError: pass
+                logger.debug(f"[{addr}] Removed client config during cleanup.")
+
+            requests_to_remove = [req_id for req_id, data in pending_context_requests.items() if data.get('conn') == conn]
+            for req_id in requests_to_remove:
+                try: del pending_context_requests[req_id]
+                except KeyError: pass
+            if requests_to_remove: logger.debug(f"[{addr}] Removed {len(requests_to_remove)} pending context requests during cleanup.")
+
+            close_socket(conn, addr)
+            # --- End Cleanup ---
+            break
+        # logger.debug(f"[{addr}] Reached end of handler loop try/except block.") # Might be noisy
+
+    # --- Cleanup after loop finishes normally (e.g., stop_server set) ---
+    logger.info(f"[{addr}] Handler loop finished (stop_server set?). Performing final cleanup.")
+    if conn in client_configs:
+        try: del client_configs[conn]
+        except KeyError: pass
+        logger.debug(f"[{addr}] Removed client config during final cleanup.")
+
+    requests_to_remove = [req_id for req_id, data in pending_context_requests.items() if data.get('conn') == conn]
+    for req_id in requests_to_remove:
+        try: del pending_context_requests[req_id]
+        except KeyError: pass
+    if requests_to_remove: logger.debug(f"[{addr}] Removed {len(requests_to_remove)} pending context requests during final cleanup.")
+
+    close_socket(conn, addr)
+    logger.info(f"[{addr}] Message handler thread function exiting.")
+
+
+def is_socket_connected(sock: socket.socket) -> bool:
+    """Checks if a socket is likely still connected."""
+    if not sock or sock.fileno() == -1: return False
+    try:
+        sock.settimeout(0.01) # Very short timeout
+        # Sending 0 bytes should succeed on connected sockets, fail otherwise
+        sock.send(b'')
+        return True
+    except (BlockingIOError, InterruptedError): return True # Ok if it would block
+    except (ConnectionResetError, BrokenPipeError, socket.error, OSError): return False # Definitively disconnected
+    except Exception as e:
+         logger.warning(f"Unexpected error checking socket status: {e}")
+         return False
     finally:
-        logger.info(f"[{addr}] Client message handler thread finished.")
-        if conn in client_configs:
-            try:
-                del client_configs[conn]
-                logger.debug(f"[{addr}] Removed config for disconnected client.")
-            except KeyError:
-                 logger.debug(f"[{addr}] Config already removed for connection on handler exit.")
-        try:
-            conn.shutdown(socket.SHUT_RDWR)
-        except (socket.error, OSError):
-            pass # Ignore errors if already closed
-        conn.close()
+        try: sock.settimeout(None) # Reset to blocking
+        except: pass
 
+def close_socket(sock: socket.socket, addr):
+    """Gracefully close a client socket."""
+    if sock and sock.fileno() != -1:
+        logger.debug(f"[{addr}] Closing socket connection.")
+        try: sock.shutdown(socket.SHUT_RDWR)
+        except (socket.error, OSError) as e:
+            if e.errno not in [107, 9, 57]: pass # Ignore "not connected", "bad fd", "Socket is not connected"
+            else: logger.warning(f"[{addr}] Error during socket shutdown: {type(e).__name__} - {e}")
+        finally:
+            try: sock.close()
+            except Exception as e: logger.warning(f"[{addr}] Error during socket close: {e}")
 
 # --- Main Server Function ---
 def start_standalone_voice_recognition_server():
-    """Starts the standalone voice recognition server."""
-    # Check dependencies after imports are attempted
+    """Starts the main server listening loop."""
     if not DEPENDENCIES_INSTALLED:
-        # Logger might not be fully set up if basic imports failed, print as fallback
-        print("CRITICAL: Cannot start server due to missing dependencies. Check logs and run setup.py.", file=sys.stderr)
-        return # Exit if core dependencies were missing
-
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        logger.critical("GEMINI_API_KEY environment variable not found. Cannot start server.")
-        sys.exit(1)
+        logger.critical("Cannot start server due to missing core dependencies.")
+        return
+    if not GEMINI_API_KEY or GEMINI_API_KEY == "your_gemini_api_key_here":
+        logger.critical("GEMINI_API_KEY is not configured. Server cannot start.")
+        return
 
     threads = []
-    server_socket = None # Define server socket outside try block for finally clause
+    server_socket = None
     try:
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # Allow address reuse
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind((HOST, PORT))
         server_socket.listen()
-        logger.info(f"Voice recognition server started on {HOST}:{PORT}")
-        logger.info("Waiting for Blender to connect...")
+        logger.info(f"Server listening on {HOST}:{PORT}")
+        logger.info("Waiting for Blender client connection...")
 
         while not stop_server.is_set():
             try:
                 server_socket.settimeout(1.0)
                 conn, addr = server_socket.accept()
-                conn.settimeout(None) # Reset timeout for the connection socket
+                conn.settimeout(None)
+                addr_str = f"{addr[0]}:{addr[1]}"
+                logger.info(f"Connection accepted from {addr_str}")
 
-                logger.info(f"Connected by {addr}")
-
-                handler_thread = threading.Thread(
-                    target=client_message_handler_thread,
-                    args=(conn, addr, api_key),
-                    daemon=True
-                )
+                handler_thread = threading.Thread(target=client_message_handler_thread, args=(conn, addr_str), name=f"Handler-{addr_str}", daemon=True)
                 handler_thread.start()
                 threads.append(handler_thread)
 
-                listener_thread = threading.Thread(
-                    target=server_audio_listener_thread,
-                    args=(conn, addr),
-                    daemon=True
-                )
+                # Start listener thread immediately after handler
+                listener_thread = threading.Thread(target=server_audio_listener_thread, args=(conn, addr_str), name=f"Listener-{addr_str}", daemon=True)
                 listener_thread.start()
                 threads.append(listener_thread)
 
-            except socket.timeout:
-                continue # Normal timeout, check stop_server flag
+            except socket.timeout: continue
+            except OSError as e:
+                 if e.errno in [98, 10048]: logger.critical(f"Failed to bind to {HOST}:{PORT}. Address already in use. Shutting down.")
+                 else: logger.error(f"Server OS error during accept/bind: {e}", exc_info=True)
+                 stop_server.set(); break
             except Exception as accept_err:
-                if not stop_server.is_set():
-                     logger.error(f"Error accepting connection: {accept_err}", exc_info=True)
-                break # Exit loop on major accept error
+                if not stop_server.is_set(): logger.error(f"Error accepting connection: {accept_err}", exc_info=True)
+                time.sleep(1)
 
     except OSError as e:
-        logger.error(f"Failed to bind to {HOST}:{PORT}. Is the port already in use? Error: {e}")
-    except Exception as e:
-        logger.error(f"Server error: {e}", exc_info=True)
+         if e.errno in [98, 10048]: logger.critical(f"Failed to bind server to {HOST}:{PORT}. Address already in use.")
+         else: logger.error(f"Server OS error during initial setup: {e}", exc_info=True)
+    except Exception as e: logger.error(f"Server error before accept loop: {e}", exc_info=True)
     finally:
         logger.info("Server shutting down...")
-        stop_server.set() # Signal threads to stop
+        stop_server.set()
         if server_socket:
-             server_socket.close() # Close the server socket
+             try: server_socket.close(); logger.info("Server listening socket closed.")
+             except Exception as close_err: logger.warning(f"Error closing server socket: {close_err}")
 
-        join_timeout = 2.0
-        # Filter out None or finished threads before joining
-        active_threads = [t for t in threads if t is not None and t.is_alive()]
-        for t in active_threads:
-            try:
-                 t.join(timeout=join_timeout)
-            except Exception as join_err:
-                 logger.warning(f"Error joining thread {t.name}: {join_err}")
+        join_timeout = 3.0
+        logger.info(f"Waiting up to {join_timeout}s for client threads to finish...")
+        # Get threads associated with this server run more reliably
+        current_pid = os.getpid()
+        # This is tricky; joining daemon threads isn't always straightforward.
+        # The finally block in each thread function handles cleanup.
+        # Give them time to see the stop_server event.
+        time.sleep(join_timeout)
 
-        pending_context_requests.clear()
-        client_configs.clear()
+        # Clear global state
+        pending_context_requests.clear(); client_configs.clear()
         logger.info("Server shutdown complete.")
 
-
 if __name__ == "__main__":
-    # Add the diagnostic prints here if needed for debugging startup issues
-    # import sys
-    # print(f"--- Running with: {sys.executable}")
-
-    logger.info("Starting standalone voice recognition server...")
+    logger.info(f"Executing __main__ block (Version: {CODE_VERSION})")
     try:
         start_standalone_voice_recognition_server()
     except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received, stopping server...")
-        stop_server.set()
+        logger.info("Keyboard interrupt received, initiating server shutdown...")
+        if not stop_server.is_set(): stop_server.set()
     except Exception as main_err:
          logger.critical(f"Critical error in main execution: {main_err}", exc_info=True)
+         if not stop_server.is_set(): stop_server.set()
     finally:
-        # Ensure stop signal is set on any exit path
-        if not stop_server.is_set():
-             stop_server.set()
-        # Give threads a moment to potentially see the stop signal before main exits
-        time.sleep(0.1)
+        if not stop_server.is_set(): stop_server.set()
+        time.sleep(0.5) # Allow final cleanup
+        logger.info("Server script main execution finished.")
