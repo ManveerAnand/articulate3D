@@ -183,12 +183,12 @@ def format_blender_context(context_data):
 
     return "\n".join(parts)
 
-# --- AI Processing Functions (Refactored) ---
+
 DEFAULT_GENERATION_CONFIG = {
-    "temperature": 0.2,
-    "top_p": 0.8,
+    "temperature": 0.4,
+    "top_p": 0.95,
     "top_k": 40,
-    "max_output_tokens": 2048,
+    "max_output_tokens": 65536,
 }
 DEFAULT_SAFETY_SETTINGS = [
     {'category': 'HARM_CATEGORY_HARASSMENT', 'threshold': 'BLOCK_MEDIUM_AND_ABOVE'},
@@ -208,14 +208,15 @@ def process_text_with_gemini(text: str, model_name: str, blender_context: dict =
     # logger.debug(f"[Text] Using context: {context_info}") # Included in prompt
 
     prompt = f"""
-You are a Blender 4.x Python script generator.
-Translate the following command into a `bpy` Python script compatible with Blender 4.x.
+You are supposed to generate just the blender python script for the specific command think on it but the output should not have anything other than the code.
+
+Translate the following command into a `bpy` Python script compatible with Blender 4..x. (i.e 4 or later).
+You should be able to handle complex tasks as well like 'create a model of a car' little complex but easy to handle. make sure that the output resemble the real object.
 
 **Instructions:**
 1.  **Output Python Code Only:** Your response must contain ONLY the Python script. Do not include ```python, explanations, comments, introductions, or any other text.
 2.  **Use Blender 4.x API:** Ensure the script uses `bpy` commands compatible with Blender 4.x.
-3.  **Handle Errors:** If the command is unclear, too complex to translate reliably, or potentially unsafe, output ONLY the following line:
-    `# Error: Command cannot be processed.`
+
 
 **Command:** {text}
 {context_info}
@@ -287,7 +288,7 @@ Listen to the following audio command and translate it into a `bpy` Python scrip
 1.  **Output Python Code Only:** Your response must contain ONLY the Python script. Do not include ```python, explanations, comments, introductions, or any other text.
 2.  **Use Blender 4.x API:** Ensure the script uses `bpy` commands compatible with Blender 4.x.
 3.  **Handle Errors:** If the command is unclear, too complex to translate reliably, or potentially unsafe, output ONLY the following line:
-    `# Error: Command cannot be processed.`
+    `# Error: Command cannot be processed. and specify the reason in one or two words`
 
 {context_info}
 
