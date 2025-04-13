@@ -36,7 +36,10 @@ def install_dependencies(env_dir):
             "google-cloud-speech", # Added for Google Cloud STT
             "sounddevice", # Recommended for client recording
             "numpy", # Often needed with audio/sounddevice
+            # "torch", # Removed: No longer needed for Silero VAD
+            # "torchaudio", # Removed: No longer needed for Silero VAD
             "pytest"
+            # Removed: "webrtcvad"
         ]
         
         # Install required packages using 'python -m pip' for better reliability

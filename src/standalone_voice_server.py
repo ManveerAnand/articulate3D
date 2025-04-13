@@ -133,6 +133,25 @@ try:
     logger.debug("Successfully imported pyaudio")
 except ImportError as e:
     logger.warning(f"Failed to import pyaudio: {e}. Microphone input might fail.")
+    DEPENDENCIES_INSTALLED = False # PyAudio is critical for mic input
+
+try:
+    import vosk
+    logger.debug("Successfully imported vosk")
+except ImportError as e:
+    logger.critical(f"Failed to import vosk: {e}. Please install vosk (`pip install vosk`).")
+    DEPENDENCIES_INSTALLED = False
+
+# Import collections (standard library, should always work)
+try:
+    import collections
+    logger.debug("Successfully imported collections.")
+except ImportError as e:
+    # This is highly unlikely but handle it just in case
+    logger.error(f"CRITICAL FAILURE: Failed to import standard library 'collections': {e}", exc_info=True)
+    # We could potentially exit here, but let's log critically and see if anything else works
+    # DEPENDENCIES_INSTALLED = False # Mark as failed if collections is critical later
+    pass # Allow to continue for now
 
 
 # Exit if core dependencies are missing
@@ -147,6 +166,17 @@ PORT = 65432
 stop_server = threading.Event()
 pending_context_requests = {} # request_id -> {data}
 client_configs = {} # conn -> {model_name, method} - NO model instance stored
+
+# --- Wake Word & VAD Configuration ---
+VOSK_MODEL_PATH = str(Path(__file__).parent.parent / "models" / "vosk-model-small-en-us-0.15") # ADJUST PATH AS NEEDED
+WAKE_WORDS = ["hello", "okay blender"] # Add more if needed
+WAKE_WORD_JSON = json.dumps(WAKE_WORDS + ["[unk]"]) # For Vosk recognizer
+WAKE_WORD_JSON = json.dumps(WAKE_WORDS + ["[unk]"]) # For Vosk recognizer
+
+# --- SpeechRecognition Configuration ---
+SR_ENERGY_THRESHOLD = 300 # Default, might need tuning
+SR_PAUSE_THRESHOLD = 0.8 # Seconds of silence before phrase is considered complete
+SR_PHRASE_TIME_LIMIT = 15 # Max seconds for a command phrase
 
 # --- Helper Functions ---
 
@@ -452,158 +482,337 @@ def transcribe_with_google_stt(audio_bytes: bytes, sample_rate: int = 16000) -> 
 # --- Server Threads ---
 
 def server_audio_listener_thread(conn: socket.socket, addr):
-    """Handles audio capture using SpeechRecognition and sends for processing."""
-    logger.info(f"[{addr}] Audio listener thread started.")
-    if 'speech_recognition' not in sys.modules:
-        logger.error(f"[{addr}] SpeechRecognition library not available. Listener thread stopping.")
+    """Handles wake word detection (Vosk) and command capture (SpeechRecognition)."""
+    logger.info(f"[{addr}] Audio listener thread started (Vosk/SpeechRecognition).")
+    # Ensure necessary libraries are loaded
+    if 'vosk' not in sys.modules or 'pyaudio' not in sys.modules or 'speech_recognition' not in sys.modules:
+        logger.error(f"[{addr}] Missing vosk, pyaudio, or speech_recognition. Listener thread stopping.")
         return
 
-    recognizer = sr.Recognizer()
-    recognizer.pause_threshold = 0.8
-    recognizer.energy_threshold = 300
-    mic_index = None
+    # --- Vosk Initialization ---
+    vosk_model = None
+    try:
+        if not Path(VOSK_MODEL_PATH).exists():
+            logger.error(f"[{addr}] Vosk model not found at: {VOSK_MODEL_PATH}")
+            raise FileNotFoundError("Vosk model path invalid")
+        vosk_model = vosk.Model(VOSK_MODEL_PATH)
+        logger.info(f"[{addr}] Vosk model loaded successfully from {VOSK_MODEL_PATH}")
+    except Exception as e:
+        logger.error(f"[{addr}] Failed to load Vosk model: {e}", exc_info=True)
+        try: conn.sendall(json.dumps({"status": "error", "message": f"Failed to load Vosk model: {e}"}).encode())
+        except: pass
+        return # Cannot proceed without model
+
+    # --- SpeechRecognition Initialisation ---
+    sr_recognizer = sr.Recognizer()
+    sr_recognizer.energy_threshold = SR_ENERGY_THRESHOLD
+    sr_recognizer.pause_threshold = SR_PAUSE_THRESHOLD
+    # We'll open the Microphone source only when needed
+
+    # --- PyAudio Initialization (for Vosk wake word listening) ---
+    pa_vosk = None
+    stream_vosk = None
+    SAMPLE_RATE = 16000 # Vosk and SR typically use 16000 Hz
+    CHANNELS = 1
+    FORMAT = pyaudio.paInt16 # 16-bit PCM
+    # Chunk size for Vosk processing
+    VOSK_CHUNK_DURATION_MS = 100 # Process in 100ms chunks for wake word
+    VOSK_CHUNK_SIZE = int(SAMPLE_RATE * VOSK_CHUNK_DURATION_MS / 1000)
+    BYTES_PER_SAMPLE = pyaudio.get_sample_size(FORMAT)
 
     try:
-        with sr.Microphone(device_index=mic_index) as source:
-            logger.info(f"[{addr}] Microphone opened. Adjusting for ambient noise (1s)...")
-            # Check connection before sending status
-            if is_socket_connected(conn):
-                try: conn.sendall(json.dumps({"status": "info", "message": "Adjusting for ambient noise..."}).encode())
-                except socket.error as send_err:
-                     logger.warning(f"[{addr}] Failed to send 'adjusting noise' status: {send_err}")
-                     # If send fails, re-check connection and return if closed
-                     if not is_socket_connected(conn): return
-            else:
-                logger.warning(f"[{addr}] Socket closed before sending 'adjusting noise' status. Aborting listener.")
-                return # Exit thread if socket is already closed
+        pa_vosk = pyaudio.PyAudio()
+        stream_vosk = pa_vosk.open(format=FORMAT,
+                         channels=CHANNELS,
+                         rate=SAMPLE_RATE,
+                         input=True,
+                         frames_per_buffer=VOSK_CHUNK_SIZE)
+        logger.info(f"[{addr}] PyAudio stream opened for Vosk (Rate: {SAMPLE_RATE}, Chunk: {VOSK_CHUNK_SIZE} frames / {VOSK_CHUNK_DURATION_MS}ms)")
 
-            recognizer.adjust_for_ambient_noise(source, duration=1)
-            logger.info(f"[{addr}] Noise adjustment complete. Energy threshold: {recognizer.energy_threshold:.2f}. Ready to listen.")
-            # Check connection before sending status
-            if is_socket_connected(conn):
-                try: conn.sendall(json.dumps({"status": "info", "message": "Listening..."}).encode())
-                except socket.error as send_err:
-                     logger.warning(f"[{addr}] Failed to send 'listening' status: {send_err}")
-                     # If send fails, re-check connection and return if closed
-                     if not is_socket_connected(conn): return
-            else:
-                logger.warning(f"[{addr}] Socket closed before sending 'listening' status. Aborting listener.")
-                return # Exit thread if socket is already closed
+        # --- Vosk Recognizer Initialization ---
+        vosk_recognizer = vosk.KaldiRecognizer(vosk_model, SAMPLE_RATE, WAKE_WORD_JSON) # Pass grammar here
+        logger.info(f"[{addr}] Vosk recognizer initialized for wake words: {WAKE_WORDS}")
 
-            while not stop_server.is_set() and is_socket_connected(conn):
-                if conn not in client_configs:
-                    time.sleep(0.5)
-                    continue
-
-                try:
-                    audio = recognizer.listen(source, timeout=5, phrase_time_limit=15)
-                    logger.info(f"[{addr}] Audio detected.")
-
-                    if stop_server.is_set() or not is_socket_connected(conn): break
-
-                    try:
-                         config = client_configs[conn]
-                         current_method = config.get('method', 'whisper')
-                         current_model = config.get('model_name', ' 2.0-flash')
-                    except KeyError:
-                         logger.warning(f"[{addr}] Configuration missing for connection during audio processing. Skipping.")
-                         continue
-
-                    logger.info(f"[{addr}] Processing detected audio using method: {current_method}")
-                    audio_bytes = audio.get_wav_data()
-
-                    # --- Add audio saving ---
-                    try:
-                        timestamp = time.strftime("%Y%m%d_%H%M%S")
-                        unique_id = str(uuid.uuid4())[:8]
-                        filename = f"captured_audio_{timestamp}_{unique_id}.wav"
-                        save_dir = Path(__file__).parent.parent / "temp_audio"
-                        save_dir.mkdir(exist_ok=True) # Ensure dir exists
-                        save_path = save_dir / filename
-                        with open(save_path, 'wb') as wf:
-                            wf.write(audio_bytes)
-                        logger.info(f"[{addr}] Saved captured audio to: {save_path}")
-                    except Exception as save_err:
-                        logger.error(f"[{addr}] Failed to save captured audio: {save_err}", exc_info=True)
-                    # --- End audio saving ---
-
-                    request_id = str(uuid.uuid4())
-                    text_result = None
-                    audio_to_process = None
-                    message_to_client = "Processing..."
-
-                    if current_method == "gemini":
-                        audio_to_process = audio_bytes
-                        message_to_client = "Processing audio with Gemini..."
-                    elif current_method == "whisper":
-                        text_result = transcribe_with_whisper(audio_bytes)
-                        message_to_client = f"Transcribed (Whisper): {text_result}" if text_result else "Whisper transcription failed."
-                    elif current_method == "google_stt":
-                        text_result = transcribe_with_google_stt(audio_bytes, sample_rate=audio.sample_rate)
-                        message_to_client = f"Transcribed (Google STT): {text_result}" if text_result else "Google STT transcription failed."
-                    else:
-                        logger.error(f"[{addr}] Unknown audio method configured: {current_method}")
-                        try: conn.sendall(json.dumps({"status": "error", "message": f"Unknown audio method: {current_method}"}).encode())
-                        except: pass
-                        continue
-
-                    # Store pending request only if transcription/selection was successful (or if using direct audio)
-                    if text_result is not None or audio_to_process is not None:
-                         pending_context_requests[request_id] = {
-                             'audio_bytes': audio_to_process,
-                             'text': text_result,
-                             'model_name': current_model,
-                             'method': current_method,
-                             'conn': conn,
-                             'addr': addr
-                         }
-                         logger.debug(f"[{addr}] Stored pending request {request_id} (Method: {current_method})")
-
-                         try:
-                             conn.sendall(json.dumps({
-                                 "status": "request_context",
-                                 "request_id": request_id,
-                                 "message": message_to_client
-                             }).encode())
-                             logger.debug(f"[{addr}] Sent context request {request_id} to client.")
-                         except socket.error as send_err:
-                             logger.error(f"[{addr}] Failed to send context request {request_id}: {send_err}")
-                             if request_id in pending_context_requests:
-                                 del pending_context_requests[request_id]
-                    else:
-                         logger.warning(f"[{addr}] No text or audio obtained for method {current_method}. Cannot proceed with request.")
-                         # Send feedback to client?
-                         try: conn.sendall(json.dumps({"status": "error", "message": f"Failed to get input via {current_method}."}).encode())
-                         except: pass
-
-
-                except sr.WaitTimeoutError: pass # Normal timeout
-                except sr.RequestError as e:
-                    logger.error(f"[{addr}] SpeechRecognition API RequestError: {e}")
-                    try: conn.sendall(json.dumps({"status": "error", "message": f"Speech Recognition API error: {e}"}).encode())
-                    except: pass
-                except Exception as e:
-                    logger.error(f"[{addr}] Error in audio listening loop: {type(e).__name__} - {e}", exc_info=True)
-                    try: conn.sendall(json.dumps({"status": "error", "message": f"Listener loop error: {e}"}).encode())
-                    except: pass
-                    time.sleep(1)
-
-    except sr.RequestError as e:
-        logger.error(f"[{addr}] SpeechRecognition RequestError during setup: {e}")
-        try: conn.sendall(json.dumps({"status": "error", "message": f"Speech Recognition setup error: {e}"}).encode())
-        except: pass
-    except OSError as e:
-         logger.error(f"[{addr}] OS Error initializing microphone (device index {mic_index}?): {e}", exc_info=True)
-         try: conn.sendall(json.dumps({"status": "error", "message": f"Microphone OS error: {e}"}).encode())
-         except: pass
     except Exception as e:
-        logger.error(f"[{addr}] Error setting up microphone/recognizer: {type(e).__name__} - {e}", exc_info=True)
-        try: conn.sendall(json.dumps({"status": "error", "message": f"Mic/Recognizer setup error: {e}"}).encode())
+        logger.error(f"[{addr}] Failed to initialize PyAudio stream or Vosk Recognizer: {e}", exc_info=True)
+        if stream_vosk: stream_vosk.close()
+        if pa_vosk: pa_vosk.terminate()
+        try: conn.sendall(json.dumps({"status": "error", "message": f"Audio/Vosk init error: {e}"}).encode())
         except: pass
+        return
+
+    # --- State Variables ---
+    STATE_IDLE = 0 # Listening for wake word via Vosk/PyAudio
+    STATE_LISTENING_COMMAND = 1 # Capturing command via SpeechRecognition
+    STATE_PROCESSING_COMMAND = 2 # Command captured, being processed
+    current_state = STATE_IDLE
+
+    try:
+        # Send initial status
+        if is_socket_connected(conn):
+            try: conn.sendall(json.dumps({"status": "info", "message": "Listening for wake word..."}).encode())
+            except socket.error as send_err:
+                 logger.warning(f"[{addr}] Failed to send initial 'listening' status: {send_err}")
+                 if not is_socket_connected(conn): return # Exit if send fails and disconnected
+        else:
+            logger.warning(f"[{addr}] Socket closed before sending initial 'listening' status. Aborting listener.")
+            return
+
+        # --- Main Audio Loop ---
+        while not stop_server.is_set() and is_socket_connected(conn):
+            try:
+                # Only read from Vosk stream if in IDLE state
+                if current_state == STATE_IDLE:
+                    chunk_data = stream_vosk.read(VOSK_CHUNK_SIZE, exception_on_overflow=False)
+                else:
+                    # Avoid reading from Vosk stream while listening/processing command
+                    time.sleep(0.1) # Small sleep to prevent busy-waiting
+                    continue
+            except IOError as e:
+                 if hasattr(e, 'errno') and e.errno == pyaudio.paInputOverflowed:
+                      logger.warning(f"[{addr}] PyAudio input overflowed. Skipping chunk.")
+                      continue
+                 else:
+                      logger.error(f"[{addr}] PyAudio stream read error: {e}", exc_info=True)
+                      break # Exit loop on other read errors
+
+            if not chunk_data:
+                logger.warning(f"[{addr}] Empty chunk read from audio stream.")
+                time.sleep(0.01)
+                continue
+
+            # --- State Machine Logic ---
+
+            # STATE: IDLE (Listening for Wake Word via Vosk)
+            if current_state == STATE_IDLE:
+                if vosk_recognizer.AcceptWaveform(chunk_data):
+                    result = json.loads(vosk_recognizer.Result())
+                    detected_text = result.get('text', '')
+                    # Check if any wake word is present (simple substring check)
+                    if any(word in detected_text for word in WAKE_WORDS):
+                        logger.info(f"[{addr}] Wake word detected by Vosk: '{detected_text}'")
+                        vosk_recognizer.Reset() # Reset Vosk state
+
+                        # --- Switch to SpeechRecognition for command capture ---
+                        current_state = STATE_LISTENING_COMMAND
+                        logger.info(f"[{addr}] Transitioning to LISTENING_COMMAND state.")
+                        try: conn.sendall(json.dumps({"status": "info", "message": "Wake word detected, listening for command..."}).encode())
+                        except: pass
+
+                        # Stop Vosk stream temporarily
+                        if stream_vosk:
+                            try:
+                                stream_vosk.stop_stream()
+                                logger.debug(f"[{addr}] Stopped Vosk PyAudio stream.")
+                            except Exception as e_stop: logger.warning(f"[{addr}] Error stopping Vosk stream: {e_stop}")
+
+                        # Capture command using SpeechRecognition
+                        command_audio_bytes = None
+                        try:
+                            with sr.Microphone(sample_rate=SAMPLE_RATE) as source:
+                                logger.info(f"[{addr}] Adjusting for ambient noise (1s)...")
+                                try: conn.sendall(json.dumps({"status": "info", "message": "Adjusting noise..."}).encode())
+                                except: pass
+                                sr_recognizer.adjust_for_ambient_noise(source, duration=1)
+                                logger.info(f"[{addr}] Listening for command via SpeechRecognition...")
+                                try: conn.sendall(json.dumps({"status": "info", "message": "Listening..."}).encode())
+                                except: pass
+                                audio_command = sr_recognizer.listen(source, phrase_time_limit=SR_PHRASE_TIME_LIMIT)
+                                command_audio_bytes = audio_command.get_wav_data()
+                                logger.info(f"[{addr}] Command captured by SpeechRecognition ({len(command_audio_bytes)} bytes).")
+                        except sr.WaitTimeoutError:
+                            logger.warning(f"[{addr}] No command heard after wake word (timeout).")
+                        except Exception as sr_err:
+                            logger.error(f"[{addr}] Error during SpeechRecognition listen: {sr_err}", exc_info=True)
+                            try: conn.sendall(json.dumps({"status": "error", "message": f"Error capturing command: {sr_err}"}).encode())
+                            except: pass
+
+                        # --- Process captured command (if any) ---
+                        if command_audio_bytes:
+                            current_state = STATE_PROCESSING_COMMAND
+                            logger.debug(f"[{addr}] Transitioning to PROCESSING state.")
+                            # Process in this thread for simplicity (consider threading later if needed)
+                            process_captured_command(conn, addr, command_audio_bytes, SAMPLE_RATE, FORMAT, CHANNELS)
+                        else:
+                            # No command captured, go back to idle
+                            current_state = STATE_IDLE
+                            logger.debug(f"[{addr}] No command captured, returning to IDLE state.")
+                            try: conn.sendall(json.dumps({"status": "info", "message": "Listening for wake word..."}).encode())
+                            except: pass
+
+                        # --- Restart Vosk stream ---
+                        if stream_vosk and not stream_vosk.is_active():
+                             try:
+                                 stream_vosk.start_stream()
+                                 logger.debug(f"[{addr}] Restarted Vosk PyAudio stream.")
+                             except Exception as e_start:
+                                 logger.error(f"[{addr}] Failed to restart Vosk stream: {e_start}", exc_info=True)
+                                 # Handle error - maybe try closing and reopening?
+                                 break # Exit loop if stream can't restart
+
+                        # If processing happened, reset state after processing call returns
+                        if current_state == STATE_PROCESSING_COMMAND:
+                            current_state = STATE_IDLE
+                            logger.debug(f"[{addr}] Reset state to IDLE after processing.")
+                            try: conn.sendall(json.dumps({"status": "info", "message": "Listening for wake word..."}).encode())
+                            except: pass
+
+                # else: # Optional: Check partial result for faster feedback
+                #     partial_result = json.loads(vosk_recognizer.PartialResult())
+                #     if any(word in partial_result.get('partial', '') for word in WAKE_WORDS):
+                #          logger.debug(f"[{addr}] Wake word potentially in partial: {partial_result.get('partial')}")
+                #          # Don't trigger yet, wait for final result for robustness
+
+            # STATE: LISTENING_COMMAND / PROCESSING_COMMAND (Handled within IDLE state block now)
+            # These states are now transient within the wake word detection logic
+            elif current_state in [STATE_LISTENING_COMMAND, STATE_PROCESSING_COMMAND]:
+                 # We should ideally not be reading from Vosk stream here
+                 # This case handles the transition back to IDLE after processing/timeout
+                 logger.debug(f"[{addr}] In state {current_state}, waiting for transition back to IDLE.")
+                 time.sleep(0.1) # Prevent busy loop if something goes wrong
+                 pass # Loop continues, state should reset soon
+
+            # Check connection status periodically
+            # if not is_socket_connected(conn): break # Already checked at loop start
+
+        # End of main while loop
+
+    except KeyboardInterrupt:
+        logger.info(f"[{addr}] Keyboard interrupt received in listener thread.")
+    except Exception as e:
+        logger.error(f"[{addr}] Unhandled error in audio listener main loop: {type(e).__name__} - {e}", exc_info=True)
     finally:
+        logger.info(f"[{addr}] Cleaning up audio listener resources...")
+        if stream_vosk:
+            try: stream_vosk.stop_stream()
+            except Exception as e_stop: logger.warning(f"[{addr}] Error stopping Vosk stream: {e_stop}")
+            try: stream_vosk.close()
+            except Exception as e_close: logger.warning(f"[{addr}] Error closing Vosk stream: {e_close}")
+            logger.debug(f"[{addr}] Vosk PyAudio stream closed.")
+        if pa_vosk:
+            try: pa_vosk.terminate()
+            except Exception as e_term: logger.warning(f"[{addr}] Error terminating PyAudio for Vosk: {e_term}")
+            logger.debug(f"[{addr}] Vosk PyAudio instance terminated.")
+        # Note: SpeechRecognition manages its own PyAudio instance internally via sr.Microphone context manager
         logger.info(f"[{addr}] Audio listener thread finished.")
 
 
+# --- Helper function to process the captured command audio ---
+def process_captured_command(conn: socket.socket, addr: str, audio_data: bytes, sample_rate: int, audio_format, channels: int):
+    """Processes the audio captured after the wake word."""
+    logger.info(f"[{addr}] Processing captured command audio ({len(audio_data)} bytes)...")
+
+    if not audio_data:
+        logger.warning(f"[{addr}] No audio data provided for processing.")
+        return
+
+    if not is_socket_connected(conn):
+        logger.warning(f"[{addr}] Client disconnected before command processing.")
+        return
+
+    try:
+        config = client_configs.get(conn) # Use .get for safety
+        if not config:
+            logger.warning(f"[{addr}] Configuration missing for connection during command processing. Skipping.")
+            try: conn.sendall(json.dumps({"status": "error", "message": "Client configuration missing."}).encode())
+            except: pass
+            return
+
+        current_method = config.get('method', 'whisper')
+        current_model = config.get('model_name', 'gemini-1.5-flash') # Ensure a default model
+        logger.info(f"[{addr}] Processing command using method: {current_method}, Model: {current_model}")
+
+        # Convert raw PCM to WAV format in memory for compatibility
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, 'wb') as wf:
+            wf.setnchannels(channels)
+            wf.setsampwidth(pyaudio.get_sample_size(audio_format))
+            wf.setframerate(sample_rate)
+            wf.writeframes(audio_data)
+        audio_bytes_wav = wav_buffer.getvalue()
+        logger.debug(f"[{addr}] Converted captured PCM to WAV format ({len(audio_bytes_wav)} bytes).")
+
+
+        # --- Add audio saving (optional, but useful for debugging) ---
+        try:
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            unique_id = str(uuid.uuid4())[:8]
+            filename = f"command_audio_{timestamp}_{unique_id}.wav"
+            save_dir = Path(__file__).parent.parent / "temp_audio"
+            save_dir.mkdir(exist_ok=True) # Ensure dir exists
+            save_path = save_dir / filename
+            with open(save_path, 'wb') as wf_save:
+                wf_save.write(audio_bytes_wav)
+            logger.info(f"[{addr}] Saved captured command audio to: {save_path}")
+        except Exception as save_err:
+            logger.error(f"[{addr}] Failed to save captured command audio: {save_err}", exc_info=True)
+        # --- End audio saving ---
+
+        request_id = str(uuid.uuid4())
+        text_result = None
+        audio_to_process = None
+        message_to_client = "Processing command..."
+
+        if current_method == "gemini":
+            # Gemini needs WAV usually, ensure mime type is correct
+            audio_to_process = audio_bytes_wav
+            message_to_client = "Processing audio command with Gemini..."
+        elif current_method == "whisper":
+            text_result = transcribe_with_whisper(audio_bytes_wav) # Pass WAV data
+            message_to_client = f"Transcribed command (Whisper): {text_result}" if text_result else "Whisper transcription failed."
+        elif current_method == "google_stt":
+            text_result = transcribe_with_google_stt(audio_bytes_wav, sample_rate=sample_rate) # Pass WAV data
+            message_to_client = f"Transcribed command (Google STT): {text_result}" if text_result else "Google STT transcription failed."
+        else:
+            logger.error(f"[{addr}] Unknown audio method configured: {current_method}")
+            try: conn.sendall(json.dumps({"status": "error", "message": f"Unknown audio method: {current_method}"}).encode())
+            except: pass
+            return # Exit processing function
+
+        # Store pending request only if transcription/selection was successful (or if using direct audio)
+        if text_result is not None or audio_to_process is not None:
+             pending_context_requests[request_id] = {
+                 'audio_bytes': audio_to_process, # This is WAV data if method=gemini
+                 'text': text_result,
+                 'model_name': current_model,
+                 'method': current_method,
+                 'conn': conn,
+                 'addr': addr
+             }
+             logger.debug(f"[{addr}] Stored pending request {request_id} (Method: {current_method}) for captured command.")
+
+             try:
+                 conn.sendall(json.dumps({
+                     "status": "request_context",
+                     "request_id": request_id,
+                     "message": message_to_client
+                 }).encode())
+                 logger.debug(f"[{addr}] Sent context request {request_id} to client for captured command.")
+             except socket.error as send_err:
+                 logger.error(f"[{addr}] Failed to send context request {request_id}: {send_err}")
+                 if request_id in pending_context_requests:
+                     del pending_context_requests[request_id]
+        else:
+             logger.warning(f"[{addr}] No text or audio obtained for method {current_method} for captured command. Cannot proceed.")
+             try: conn.sendall(json.dumps({"status": "error", "message": f"Failed to get input via {current_method} for command."}).encode())
+             except: pass
+
+    except Exception as e:
+        logger.error(f"[{addr}] Error in process_captured_command: {type(e).__name__} - {e}", exc_info=True)
+        try: conn.sendall(json.dumps({"status": "error", "message": f"Error processing command audio: {e}"}).encode())
+        except: pass
+
+
+# --- Original SpeechRecognition based listener (KEEP FOR REFERENCE OR FALLBACK?) ---
+# def server_audio_listener_thread_speechrecognition(conn: socket.socket, addr):
+#     """Handles audio capture using SpeechRecognition and sends for processing."""
+#     logger.info(f"[{addr}] Audio listener thread started (SpeechRecognition).")
+#     # ... (original code from before) ...
+#     finally:
+#         logger.info(f"[{addr}] Audio listener thread (SpeechRecognition) finished.")
+
+
+# --- Client Message Handling ---
 def client_message_handler_thread(conn: socket.socket, addr):
     """Handles messages received from a specific client connection."""
     logger.info(f"[{addr}] Message handler thread started (Version: {CODE_VERSION}).")
@@ -904,9 +1113,15 @@ def start_standalone_voice_recognition_server():
                 threads.append(handler_thread)
 
                 # Start listener thread immediately after handler
-                listener_thread = threading.Thread(target=server_audio_listener_thread, args=(conn, addr_str), name=f"Listener-{addr_str}", daemon=True)
+                # Start the NEW listener thread
+                listener_thread = threading.Thread(target=server_audio_listener_thread, args=(conn, addr_str), name=f"Listener-Vosk-{addr_str}", daemon=True)
                 listener_thread.start()
                 threads.append(listener_thread)
+
+                # Keep the old one commented out for now
+                # listener_thread_sr = threading.Thread(target=server_audio_listener_thread_speechrecognition, args=(conn, addr_str), name=f"Listener-SR-{addr_str}", daemon=True)
+                # listener_thread_sr.start()
+                # threads.append(listener_thread_sr)
 
             except socket.timeout: continue
             except OSError as e:
