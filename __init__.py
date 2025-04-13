@@ -145,10 +145,15 @@ def handle_script(context, script):
         logger.error(f"Error handling script: {str(e)}", exc_info=True)
         update_console(context, f"Error handling script: {str(e)}")
 
+import json # Add json import for safe string conversion
+
 def process_voice_client_message(context, message):
     global last_transcription, command_history
     try:
-        logger.debug(f"Processing message: {message}")
+        # Ensure message is logged safely as a string
+        log_message_str = json.dumps(message) if isinstance(message, dict) else str(message)
+        logger.debug(f"Processing message: {log_message_str[:500]}") # Log truncated message safely
+
         if isinstance(message, str):
             update_console(context, message)
         elif isinstance(message, dict):
@@ -184,21 +189,24 @@ def process_voice_client_message(context, message):
                 command_text = original_text # Prefer text command origin if available
                 if not command_text and request_id:
                     # Try to find the original transcription from the history based on request_id?
-                    # This is complex. For now, just use a placeholder if it came from voice.
-                    # We need the listener thread to maybe store the transcription with the request_id.
-                    # Let's assume for now the 'message' in the script response might contain useful info.
-                    command_text = f"Voice Command ({request_id})" # Placeholder
+                    # Try to find the original transcription using request_id (if available)
+                    # This part still needs a mechanism to link request_id to transcription reliably.
+                    # For now, use a clearer placeholder if origin is unknown.
+                    if not command_text and request_id:
+                        command_text = f"Voice Command ({request_id})" # Placeholder if only ID is known
+                    elif not command_text:
+                        command_text = "Unknown Script Source" # Better placeholder if no info
 
                 if script_content: # Only queue if there's a script
                     script_queue.append((script_content, command_text))
-                    update_console(context, f"Received script for '{command_text or 'Unknown'}' - queued.")
+                    update_console(context, f"Received script for '{command_text}' - queued.")
                     # Don't clear last_transcription here, it's handled by context request flow
                 else:
-                     logger.warning(f"Received script message status but no script content for '{command_text or 'Unknown'}'.")
-                     update_console(context, f"Script generation failed for '{command_text or 'Unknown'}'.")
+                     logger.warning(f"Received script message status but no script content for '{command_text}'.")
+                     update_console(context, f"Script generation failed for '{command_text}'.")
                      # Log failed attempt to history
                      entry = {
-                         'transcription': command_text or 'Failed Voice Command',
+                         'transcription': command_text, # Use the determined command_text
                          'status': 'Failed Generation',
                          'script': None, 'timestamp': time.time(), 'starred': False
                      }
@@ -230,44 +238,44 @@ def process_voice_client_message(context, message):
             logger.warning(f"Received unexpected message format: {type(message)} - {message}")
             update_console(context, str(message))
     except Exception as e:
-        ui_error_msg = f"Error processing message from server: {str(e)}"
-        logger.error(ui_error_msg, exc_info=True)
-        update_console(context, ui_error_msg)
+            # Log the raw error details for better debugging
+            ui_error_msg = f"Error processing message: {str(e)}"
+            logger.error(f"Error processing message: {str(e)}. Raw message: {log_message_str[:500]}", exc_info=True)
+            update_console(context, ui_error_msg)
 
 def execute_scripts_timer():
     global command_history
     context = bpy.context
     needs_redraw = False
     if script_queue:
-        script_to_execute, transcription = script_queue.pop(0)
-        logger.debug(f"Dequeued script for transcription: {transcription}")
+        script_to_execute, transcription = script_queue.pop(0) # transcription should now be more reliable
+        logger.debug(f"Dequeued script for transcription: '{transcription}'") # Log transcription clearly
         status = 'Unknown'
         entry_timestamp = time.time() # Use consistent timestamp
         try:
-            logger.info(f"Attempting to execute script:\n---\n{script_to_execute}\n---")
+            logger.info(f"Attempting to execute script for '{transcription}':\n---\n{script_to_execute}\n---")
             logger.info(f"Context before exec: area={context.area.type if context.area else 'None'}, window={context.window.screen.name if context.window else 'None'}, mode={context.mode if hasattr(context, 'mode') else 'N/A'}")
-            update_console(context, f"Executing script for: {transcription or 'Unknown command'}")
+            update_console(context, f"Executing script for: {transcription}") # Use the transcription directly
             exec(script_to_execute, {"bpy": bpy})
             status = 'Success'
-            update_console(context, "Script executed successfully.")
+            update_console(context, f"Script for '{transcription}' executed successfully.")
         except Exception as e:
             status = 'Script Error'
-            ui_error_msg = f"Script Execution Error: {str(e)}"
+            ui_error_msg = f"Script Execution Error for '{transcription}': {str(e)}"
             logger.error(ui_error_msg, exc_info=True)
             update_console(context, ui_error_msg)
-        
-        if transcription:
-             entry = {
-                 'transcription': transcription, 'status': status,
-                 'script': script_to_execute, 'timestamp': entry_timestamp,
-                 'starred': False # New entries are never starred by default
-             }
-             command_history.append(entry)
-             logger.debug(f"Appended to command_history: {entry}")
-             needs_redraw = True
-        else:
-              logger.warning("Script executed, but no transcription was associated.")
-              
+
+        # Always add to history, even if transcription was a placeholder
+        entry = {
+            'transcription': transcription, 'status': status,
+            'script': script_to_execute, 'timestamp': entry_timestamp,
+            'starred': False # New entries are never starred by default
+        }
+        command_history.append(entry)
+        logger.debug(f"Appended to command_history: {entry}")
+        needs_redraw = True
+        # Removed redundant check for transcription before adding to history
+
     if needs_redraw:
         logger.debug("Tagging UI for redraw.")
         for window in context.window_manager.windows:

@@ -188,7 +188,7 @@ DEFAULT_GENERATION_CONFIG = {
     "temperature": 0.2,
     "top_p": 0.8,
     "top_k": 40,
-    "max_output_tokens": 2048,
+    "max_output_tokens": 8096,
 }
 DEFAULT_SAFETY_SETTINGS = [
     {'category': 'HARM_CATEGORY_HARASSMENT', 'threshold': 'BLOCK_MEDIUM_AND_ABOVE'},
@@ -214,12 +214,8 @@ Translate the following command into a `bpy` Python script compatible with Blend
 **Instructions:**
 1.  **Output Python Code Only:** Your response must contain ONLY the Python script. Do not include ```python, explanations, comments, introductions, or any other text.
 2.  **Use Blender 4.x API:** Ensure the script uses `bpy` commands compatible with Blender 4.x.
-3.  **Handle Errors:** If the command is unclear, too complex to translate reliably, or potentially unsafe, output ONLY the following line:
-    `# Error: Command cannot be processed.`
 
 **Command:** {text}
-{context_info}
-
 **Script:**
 """
 
