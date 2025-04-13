@@ -130,6 +130,7 @@ class VoiceCommandProperties(bpy.types.PropertyGroup):
     console_output: bpy.props.StringProperty(name="Console Output", default="Ready...", maxlen=1024)
     show_history: bpy.props.BoolProperty(name="Show Command History", default=True)
     show_starred: bpy.props.BoolProperty(name="Show Starred Commands", default=False)
+    is_executing_script: bpy.props.BoolProperty(name="Is Executing Script", default=False, description="Flag to indicate if a script is currently running")
 
 # --- Core Functions ---
 def update_console(context, text):
@@ -147,8 +148,10 @@ def handle_script(context, script):
 
 def process_voice_client_message(context, message):
     global last_transcription, command_history
+    # Using print for addon-side debugging as logger might not show in Blender console reliably
+    print(f"[DEBUG] process_voice_client_message: Received raw message: {message}")
     try:
-        logger.debug(f"Processing message: {message}")
+        # logger.debug(f"Processing message: {message}") # Keep logger for file log
         if isinstance(message, str):
             update_console(context, message)
         elif isinstance(message, dict):
@@ -157,26 +160,49 @@ def process_voice_client_message(context, message):
             request_id = message.get("request_id") # Get request ID if present
 
             if status == "request_context":
+                props = context.scene.voice_command_props # Get props
                 # Server is asking for context for a voice command
                 logger.info(f"Received context request {request_id}: {msg_text}")
                 update_console(context, f"Server: {msg_text}") # Show transcription/status
-                # Immediately gather and send context back
-                try:
-                    import sys, os
-                    addon_dir = os.path.dirname(os.path.abspath(__file__))
-                    if addon_dir not in sys.path: sys.path.insert(0, addon_dir)
-                    import blender_voice_client
-                    context_dict = blender_voice_client.get_blender_context()
-                    blender_voice_client.send_context_response(request_id, context_dict)
-                    logger.debug(f"Sent context response for {request_id}")
-                except Exception as e:
-                    logger.error(f"Failed to send context response for {request_id}: {e}", exc_info=True)
-                    update_console(context, f"Error sending context: {e}")
+
+                # --- Check execution state ---
+                if props.is_executing_script:
+                    logger.warning(f"Ignoring context request {request_id} because a script is currently executing.")
+                    update_console(context, "Ignoring new command: Script execution in progress...")
+                    # Do not proceed further if a script is running
+                else:
+                    # --- End Check ---
+                    # Immediately gather and send context back
+                    try:
+                        print(f"[DEBUG] process_voice_client_message: Gathering context for request {request_id}...")
+                        # Ensure blender_voice_client is imported correctly
+                        import sys, os
+                        addon_dir = os.path.dirname(os.path.abspath(__file__))
+                        if addon_dir not in sys.path: sys.path.insert(0, addon_dir)
+                        import blender_voice_client
+                        import importlib
+                        importlib.reload(blender_voice_client) # Ensure latest version is used
+
+                        context_dict = blender_voice_client.get_blender_context()
+                        # Add specific error handling for sending context response
+                        try:
+                            blender_voice_client.send_context_response(request_id, context_dict)
+                            logger.debug(f"Sent context response for {request_id}")
+                        except socket.error as sock_err:
+                             logger.warning(f"Socket error sending context response for {request_id} (connection likely closed): {sock_err}")
+                             update_console(context, f"Warning: Connection lost before sending context for {request_id}")
+                        except Exception as send_ctx_err:
+                             logger.error(f"Unexpected error sending context response for {request_id}: {send_ctx_err}", exc_info=True)
+                             update_console(context, f"Error sending context: {send_ctx_err}")
+                    except Exception as e: # Catch errors during context gathering or import
+                        logger.error(f"Failed to gather/send context response for {request_id}: {e}", exc_info=True)
+                        update_console(context, f"Error gathering/sending context: {e}")
 
             elif status == "transcribed": # This might be replaced by request_context message now
                 last_transcription = msg_text.replace("Transcribed: ", "").strip()
                 update_console(context, f"Server: {msg_text}")
             elif status == "script":
+                print(f"[DEBUG] process_voice_client_message: Received 'script' status.")
                 script_content = message.get("script", "")
                 original_text = message.get("original_text") # Text from edited command
                 # If request_id is present, it came from a voice command via context request
@@ -206,6 +232,7 @@ def process_voice_client_message(context, message):
 
 
             elif status == "error":
+                print(f"[DEBUG] process_voice_client_message: Received 'error' status: {msg_text}")
                 error_msg = f"Server Error: {msg_text}"
                 logger.error(error_msg)
                 update_console(context, error_msg)
@@ -237,16 +264,20 @@ def process_voice_client_message(context, message):
 def execute_scripts_timer():
     global command_history
     context = bpy.context
+    props = context.scene.voice_command_props # Get props
     needs_redraw = False
-    if script_queue:
+
+    # Only process queue if not already executing
+    if script_queue and not props.is_executing_script:
         script_to_execute, transcription = script_queue.pop(0)
         logger.debug(f"Dequeued script for transcription: {transcription}")
         status = 'Unknown'
         entry_timestamp = time.time() # Use consistent timestamp
+        props.is_executing_script = True # Set flag before execution
         try:
             logger.info(f"Attempting to execute script:\n---\n{script_to_execute}\n---")
             logger.info(f"Context before exec: area={context.area.type if context.area else 'None'}, window={context.window.screen.name if context.window else 'None'}, mode={context.mode if hasattr(context, 'mode') else 'N/A'}")
-            update_console(context, f"Executing script for: {transcription or 'Unknown command'}")
+            update_console(context, f"Executing script for: {transcription or 'Unknown command'}...") # Indicate execution start
             exec(script_to_execute, {"bpy": bpy})
             status = 'Success'
             update_console(context, "Script executed successfully.")
@@ -255,7 +286,10 @@ def execute_scripts_timer():
             ui_error_msg = f"Script Execution Error: {str(e)}"
             logger.error(ui_error_msg, exc_info=True)
             update_console(context, ui_error_msg)
-        
+        finally:
+            props.is_executing_script = False # Ensure flag is reset even on error
+            logger.debug("Reset is_executing_script flag.")
+
         if transcription:
              entry = {
                  'transcription': transcription, 'status': status,
@@ -312,6 +346,9 @@ class BLENDER_OT_voice_command(bpy.types.Operator):
             addon_dir = os.path.dirname(os.path.abspath(__file__))
             if addon_dir not in sys.path: sys.path.insert(0, addon_dir)
             import blender_voice_client
+            import importlib
+            importlib.reload(blender_voice_client) # Ensure latest client code is used
+
             update_env_file(props.api_key)
             update_console(context, "Validating API key...")
             if not self.validate_api_key(props.api_key):
@@ -368,6 +405,9 @@ class BLENDER_OT_stop_voice_command(bpy.types.Operator):
             addon_dir = os.path.dirname(os.path.abspath(__file__))
             if addon_dir not in sys.path: sys.path.insert(0, addon_dir)
             import blender_voice_client
+            import importlib
+            importlib.reload(blender_voice_client) # Ensure latest client code is used
+
             update_console(context, "Stopping voice recognition...")
             blender_voice_client.stop_client(lambda msg: update_console(context, msg))
             if bpy.app.timers.is_registered(execute_scripts_timer):
