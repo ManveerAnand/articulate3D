@@ -4,6 +4,7 @@ import json
 import socket
 import threading
 import subprocess
+import time # Added for retry delay
 from pathlib import Path
 import bpy # Import bpy for context gathering
 
@@ -52,9 +53,18 @@ def get_blender_context():
                     for obj in selected_objs
                 ]
 
-            # Get names of objects in the scene's main collection
-            if bpy.context.scene.collection and bpy.context.scene.collection.objects:
-                 context_data["scene_objects"] = [obj.name for obj in bpy.context.scene.collection.objects]
+            # Get names of ALL objects in the scene's collections recursively
+            all_scene_objects = []
+            def get_objects_recursive(collection):
+                for obj in collection.objects:
+                    if obj.name not in all_scene_objects: # Avoid duplicates if linked
+                        all_scene_objects.append(obj.name)
+                for child_coll in collection.children:
+                    get_objects_recursive(child_coll)
+
+            if bpy.context.scene.collection:
+                get_objects_recursive(bpy.context.scene.collection)
+            context_data["scene_objects"] = all_scene_objects
 
     except Exception as e:
         # Removed problematic operator call from except block
@@ -114,24 +124,45 @@ def start_voice_server():
         return None
 
 def connect_to_server(callback=None):
-    """Connect to the voice recognition server"""
+    """Connect to the voice recognition server with retries"""
     global client_socket
-    
-    try:
-        # Create a socket object
-        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        
-        # Connect to the server
-        client_socket.connect((HOST, PORT))
-        
-        if callback:
-            callback("Connected to voice recognition server")
-        
-        return True
-    except Exception as e:
-        if callback:
-            callback(f"Error connecting to server: {e}")
-        return False
+    max_retries = 5
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            # Create a socket object
+            client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+            # Connect to the server
+            client_socket.connect((HOST, PORT))
+
+            if callback:
+                callback("Connected to voice recognition server")
+
+            return True # Connection successful
+        except Exception as e:
+            last_error = e
+            if client_socket: # Close the socket if connection failed
+                try:
+                    client_socket.close()
+                except: pass # Ignore errors during close
+                client_socket = None
+
+            if attempt < max_retries - 1:
+                if callback:
+                    # Optional: Log retry attempt
+                    # callback(f"Connection attempt {attempt + 1} failed. Retrying in 1 second...")
+                    pass
+                time.sleep(1) # Wait before retrying
+            else:
+                # Last attempt failed
+                if callback:
+                    callback(f"Error connecting to server after {max_retries} attempts: {last_error}")
+                return False
+
+    # Should not be reached if logic is correct, but return False just in case
+    return False
 
 def receive_messages(callback=None):
     """Receive messages from the server"""
@@ -141,54 +172,118 @@ def receive_messages(callback=None):
         if callback:
             callback("Not connected to server")
         return
-    
+
+    message_buffer = "" # Buffer to accumulate incoming data
+
     while not stop_flag.is_set():
         try:
             # Set a timeout to allow checking the stop flag
             client_socket.settimeout(0.5)
-            
+
             # Receive data from the server
             data = client_socket.recv(4096)
-            
+
             if not data:
                 # Connection closed by server
+                print("[CLIENT DEBUG] Socket recv returned empty. Connection closed by server.") # DEBUG
                 if callback:
                     callback("Connection closed by server")
-                break
-            
-            # Parse the JSON message
-            message = json.loads(data.decode())
-            
-            # Process the message based on its status
-            if message["status"] == "script":
-                # Extract the script and add it to the execution queue
-                script = message.get("script", "")
-                # Strip markdown code block markers if present
-                script = script.replace("```python", "").replace("```", "").strip()
-                if script and callback:
-                    # Print the script to terminal for debugging
-                    print(f"\nExecuting script:\n{script}\n")
-                    # Pass the entire message to the callback with cleaned script
-                    callback({"status": "script", "message": "Received script", "script": script})
-            else:
-                # For other message types, pass the full message dictionary
-                if callback:
-                    callback(message) # <--- Change this line
+                # Process any remaining data in the buffer before breaking
+                if message_buffer:
+                    print(f"Processing remaining buffer on disconnect: {message_buffer}") # Debug print
+                    # Attempt to process remaining buffer content (similar logic as below)
+                    # This part might need refinement depending on expected message boundaries
+                    try:
+                        # Simple attempt: Assume remaining buffer is one message
+                        message = json.loads(message_buffer)
+                        # Process the message (duplicate code - consider refactoring)
+                        if message.get("status") == "script":
+                            script = message.get("script", "").replace("```python", "").replace("```", "").strip()
+                            if script and callback:
+                                print(f"\nExecuting script (from buffer):\n{script}\n")
+                                callback({"status": "script", "message": "Received script", "script": script})
+                        elif callback:
+                            callback(message)
+                    except json.JSONDecodeError as e_rem:
+                        if callback:
+                                callback(f"Error decoding remaining buffer: {e_rem}. Buffer: {message_buffer}")
+                break # Exit loop after handling disconnect
+
+            decoded_data = data.decode('utf-8')
+            print(f"[CLIENT DEBUG] Received {len(data)} bytes. Decoded: '{decoded_data[:200]}...'") # DEBUG - Log received data (truncated)
+            message_buffer += decoded_data
+            print(f"[CLIENT DEBUG] Buffer size after adding: {len(message_buffer)}") # DEBUG
+
+            # Process the buffer for complete JSON objects
+            print(f"[CLIENT DEBUG] Starting buffer processing loop. Buffer: '{message_buffer[:200]}...'") # DEBUG
+            decoder = json.JSONDecoder()
+            scan_idx = 0 # Start scanning from the beginning of the buffer
+            while scan_idx < len(message_buffer):
+                # Skip leading whitespace
+                while scan_idx < len(message_buffer) and message_buffer[scan_idx].isspace():
+                    scan_idx += 1
+                if scan_idx == len(message_buffer):
+                    # Only whitespace left
+                    message_buffer = "" # Clear buffer
+                    break
+
+                print(f"[CLIENT DEBUG] Attempting decoder.raw_decode at index {scan_idx}") # DEBUG
+                try:
+                    # Attempt to decode a JSON object starting at scan_idx
+                    message, end_idx = decoder.raw_decode(message_buffer, scan_idx)
+                    print(f"[CLIENT DEBUG] Successfully decoded JSON object ending at index {end_idx}. Status: {message.get('status', 'N/A')}") # DEBUG
+
+                    # Successfully parsed, process the message
+                    if message.get("status") == "script":
+                        script = message.get("script", "").replace("```python", "").replace("```", "").strip()
+                        # Corrected indentation for the inner if statement
+                        if script and callback:
+                            print(f"\nExecuting script:\n{script}\n")
+                            callback({"status": "script", "message": "Received script", "script": script, "original_text": message.get("original_text")}) # Pass original_text
+                    # Corrected indentation for the elif statement
+                    elif callback:
+                        callback(message) # Pass the full dictionary
+
+                    # Remove the processed object from the buffer
+                    message_buffer = message_buffer[end_idx:]
+                    print(f"[CLIENT DEBUG] Removed processed JSON. Remaining buffer: '{message_buffer[:200]}...'") # DEBUG
+                    scan_idx = 0 # Reset scan index for the potentially remaining buffer
+                    # Continue the inner loop to check for more objects
+                except json.JSONDecodeError as json_err:
+                    # This means there isn't a complete JSON object starting at scan_idx
+                    # in the current buffer. Stop scanning and wait for more data.
+                    print(f"[CLIENT DEBUG] JSONDecodeError at index {scan_idx}: {json_err}. Waiting for more data. Buffer: '{message_buffer[scan_idx:scan_idx+100]}...'") # DEBUG
+                    break # Exit the inner while loop, go back to waiting for socket data
+                except Exception as inner_e:
+                     # Catch other potential errors during buffer processing
+                     print(f"[CLIENT DEBUG] Error during raw_decode: {type(inner_e).__name__} - {inner_e}. Buffer: {message_buffer[:200]}...") # DEBUG
+                     if callback:
+                         callback(f"Error processing message buffer: {inner_e}. Buffer: {message_buffer}")
+                     # Decide whether to clear buffer or break outer loop based on error
+                     message_buffer = "" # Clear buffer on unexpected error to prevent infinite loops
+                     print("[CLIENT DEBUG] Cleared buffer due to unexpected inner error.") # DEBUG
+                     break # Break inner loop
 
         except socket.timeout:
             # This is expected, just continue the loop
+            # print("[CLIENT DEBUG] Socket recv timed out.") # Can be noisy, keep commented unless needed
             pass
-        except json.JSONDecodeError as e:
-            if callback:
-                callback(f"Error decoding message: {e}")
-            # Optionally break or continue here depending on desired behavior
-        except socket.error as e: # Catch specific socket errors first (more specific than generic Exception)
+        except socket.error as e: # Catch specific socket errors first
             if callback:
                 callback(f"Socket error receiving message: {e}")
-            break # Break loop on socket errors
-        # Removed generic Exception catch to isolate potential issues
-    
-    # Close the socket when done
+            break # Break outer loop on socket errors
+        except UnicodeDecodeError as e:
+             if callback:
+                 callback(f"Error decoding received data: {e}")
+             # Decide how to handle - potentially clear buffer or break
+             message_buffer = "" # Clear potentially corrupt buffer
+             continue # Or break? For now, continue.
+        except Exception as outer_e: # Catch unexpected errors in the outer loop
+             if callback:
+                 callback(f"Unexpected error in receive loop: {outer_e}")
+             break # Break outer loop on unexpected errors
+
+    # Close the socket when done (loop exited)
     if client_socket:
         try:
             client_socket.close()

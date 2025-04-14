@@ -169,7 +169,7 @@ client_configs = {} # conn -> {model_name, method} - NO model instance stored
 
 # --- Wake Word & VAD Configuration ---
 VOSK_MODEL_PATH = str(Path(__file__).parent.parent / "models" / "vosk-model-small-en-us-0.15") # ADJUST PATH AS NEEDED
-WAKE_WORDS = ["hello", "okay blender"] # Add more if needed
+WAKE_WORDS = ["okay blender","pornhub"] # Add more if needed
 WAKE_WORD_JSON = json.dumps(WAKE_WORDS + ["[unk]"]) # For Vosk recognizer
 WAKE_WORD_JSON = json.dumps(WAKE_WORDS + ["[unk]"]) # For Vosk recognizer
 
@@ -244,8 +244,12 @@ Translate the following command into a `bpy` Python script compatible with Blend
 **Instructions:**
 1.  **Output Python Code Only:** Your response must contain ONLY the Python script. Do not include ```python, explanations, comments, introductions, or any other text.
 2.  **Use Blender 4.x API:** Ensure the script uses `bpy` commands compatible with Blender 4.x.
+3.  **Prioritize `bpy.data`:** Whenever possible, use the `bpy.data` API for creating/manipulating objects, meshes, materials, etc. It is more robust than `bpy.ops` when run from scripts. Only use `bpy.ops` if `bpy.data` is not suitable for the specific task.
 
 **Command:** {text}
+**Current Blender Context:**
+{context_info}
+
 **Script:**
 """
 
@@ -312,9 +316,11 @@ Listen to the following audio command and translate it into a `bpy` Python scrip
 **Instructions:**
 1.  **Output Python Code Only:** Your response must contain ONLY the Python script. Do not include ```python, explanations, comments, introductions, or any other text.
 2.  **Use Blender 4.x API:** Ensure the script uses `bpy` commands compatible with Blender 4.x.
-3.  **Handle Errors:** If the command is unclear, too complex to translate reliably, or potentially unsafe, output ONLY the following line:
+3.  **Prioritize `bpy.data`:** Whenever possible, use the `bpy.data` API for creating/manipulating objects, meshes, materials, etc. It is more robust than `bpy.ops` when run from scripts. Only use `bpy.ops` if `bpy.data` is not suitable for the specific task.
+4.  **Handle Errors:** If the command is unclear, too complex to translate reliably, or potentially unsafe, output ONLY the following line:
     `# Error: Command cannot be processed.`
 
+**Current Blender Context:**
 {context_info}
 
 **Script:**
@@ -887,20 +893,74 @@ def client_message_handler_thread(conn: socket.socket, addr):
                         script = None
                         method = pending_data['method']
                         model_name = pending_data['model_name']
-                        original_text = pending_data.get('text')
-                        audio_bytes = pending_data.get('audio_bytes')
+                        original_text = pending_data.get('text') # For whisper/google_stt
+                        audio_bytes = pending_data.get('audio_bytes') # For gemini direct audio
+                        max_retries = 2 # Attempt 1 + 1 retry
 
-                        if method == "gemini":
-                            if audio_bytes: script = process_audio_with_gemini(audio_bytes, model_name, received_context)
-                            else: logger.error(f"[{addr}] No audio data in pending request {request_id} for Gemini method.")
-                        elif method in ["whisper", "google_stt"]:
-                            if original_text: script = process_text_with_gemini(original_text, model_name, received_context)
-                            else: logger.error(f"[{addr}] No transcribed text in pending request {request_id} for method {method}.")
-                        else:
-                            logger.error(f"[{addr}] Unknown method '{method}' in pending request {request_id}.")
+                        for attempt in range(max_retries):
+                            logger.info(f"[{addr}] Script generation attempt {attempt + 1}/{max_retries} for request {request_id} (Method: {method})")
+                            error_context_for_retry = "" # Context for the retry prompt
 
-                        # Determine response based on whether a valid script was generated
-                        if script:
+                            if attempt > 0: # This is a retry attempt
+                                error_context_for_retry = f"""
+**Previous Attempt Failed:**
+The previous attempt to generate a script for the command failed.
+Failed Script/Error:
+```
+{script if script else 'No script returned or generation error occurred.'}
+```
+Please analyze the original command and the previous failure, then generate a corrected Blender 4.x Python script using `bpy`.
+**IMPORTANT: Prioritize using the `bpy.data` API for object creation and manipulation where possible, as it is less dependent on UI context than `bpy.ops`.** Only use `bpy.ops` if `bpy.data` is not suitable for the specific task.
+Ensure the output is ONLY the Python code.
+"""
+
+                            # --- Call appropriate Gemini function ---
+                            if method == "gemini":
+                                if audio_bytes:
+                                    # Modify prompt for retry if needed
+                                    # Note: process_audio_with_gemini needs modification to accept retry context
+                                    # For now, we'll just retry the same audio - simpler implementation
+                                    # TODO: Enhance process_audio_with_gemini to handle retry prompts if needed
+                                    script = process_audio_with_gemini(audio_bytes, model_name, received_context) # Pass original context
+                                else:
+                                    logger.error(f"[{addr}] No audio data in pending request {request_id} for Gemini method on attempt {attempt + 1}.")
+                                    script = None # Ensure script is None if no audio
+                                    break # No point retrying if audio is missing
+                            elif method in ["whisper", "google_stt"]:
+                                if original_text:
+                                    # Modify prompt for retry if needed
+                                    text_for_gemini = original_text
+                                    if attempt > 0:
+                                        # Prepend error context to the text for retry
+                                        # Note: process_text_with_gemini needs modification to handle this combined prompt
+                                        # Let's modify process_text_with_gemini to accept an optional retry_context
+                                        # For now, let's just retry with original text - simpler
+                                        # TODO: Enhance process_text_with_gemini to handle retry prompts
+                                        pass # Keep text_for_gemini as original_text for now
+                                    script = process_text_with_gemini(text_for_gemini, model_name, received_context)
+                                else:
+                                    logger.error(f"[{addr}] No transcribed text in pending request {request_id} for method {method} on attempt {attempt + 1}.")
+                                    script = None # Ensure script is None if no text
+                                    break # No point retrying if text is missing
+                            else:
+                                logger.error(f"[{addr}] Unknown method '{method}' in pending request {request_id}.")
+                                script = None
+                                break # Unknown method, stop trying
+
+                            # --- Check script validity ---
+                            is_valid_script = script and script.strip() and "# Error:" not in script
+                            if is_valid_script:
+                                logger.info(f"[{addr}] Successfully generated script on attempt {attempt + 1} for request {request_id}.")
+                                break # Exit retry loop on success
+                            else:
+                                logger.warning(f"[{addr}] Script generation attempt {attempt + 1} failed for request {request_id}. Script: '{script}'")
+                                if attempt < max_retries - 1:
+                                    time.sleep(0.5) # Small delay before retry
+                                # Loop continues for the next attempt
+
+                        # --- After loop ---
+                        # Determine final response status based on the final state of 'script'
+                        if script and script.strip() and "# Error:" not in script:
                             response_status = "script"
                             response_message = "Generated script"
                              # Log the actual script content (Corrected Indentation)
@@ -945,10 +1005,47 @@ def client_message_handler_thread(conn: socket.socket, addr):
 
                     if text_to_process and model_name:
                         logger.info(f"[{addr}] Processing direct text command (ID: {request_id_text})...")
-                        script = process_text_with_gemini(text_to_process, model_name, context_for_text)
+                        script = None
+                        max_retries_text = 2
 
-                        # Determine response based on whether a valid script was generated
-                        if script:
+                        for attempt_text in range(max_retries_text):
+                            logger.info(f"[{addr}] Text script generation attempt {attempt_text + 1}/{max_retries_text} for request {request_id_text}")
+                            error_context_for_retry_text = ""
+
+                            if attempt_text > 0: # This is a retry attempt
+                                error_context_for_retry_text = f"""
+**Previous Attempt Failed:**
+The previous attempt to generate a script for the command '{text_to_process}' failed.
+Failed Script/Error:
+```
+{script if script else 'No script returned or generation error occurred.'}
+```
+Please analyze the original command ('{text_to_process}') and the previous failure, then generate a corrected Blender 4.x Python script using `bpy`.
+**IMPORTANT: Prioritize using the `bpy.data` API for object creation and manipulation where possible, as it is less dependent on UI context than `bpy.ops`.** Only use `bpy.ops` if `bpy.data` is not suitable for the specific task.
+Ensure the output is ONLY the Python code.
+"""
+                                # TODO: Enhance process_text_with_gemini to handle retry prompts (pass error_context_for_retry_text)
+                                # For now, just retry with original text
+                                text_for_gemini_retry = text_to_process # Keep original text for now
+                            else:
+                                text_for_gemini_retry = text_to_process
+
+                            script = process_text_with_gemini(text_for_gemini_retry, model_name, context_for_text)
+
+                            # --- Check script validity ---
+                            is_valid_script_text = script and script.strip() and "# Error:" not in script
+                            if is_valid_script_text:
+                                logger.info(f"[{addr}] Successfully generated script from text on attempt {attempt_text + 1} for request {request_id_text}.")
+                                break # Exit retry loop on success
+                            else:
+                                logger.warning(f"[{addr}] Text script generation attempt {attempt_text + 1} failed for request {request_id_text}. Script: '{script}'")
+                                if attempt_text < max_retries_text - 1:
+                                    time.sleep(0.5) # Small delay before retry
+                                # Loop continues for the next attempt
+
+                        # --- After loop ---
+                        # Determine final response status based on the final state of 'script'
+                        if script and script.strip() and "# Error:" not in script:
                             response_status_text = "script"
                             response_message_text = "Generated script from text"
                              # Log the actual script content (Corrected Indentation)
