@@ -1,11 +1,10 @@
 import os
 import os
+import os
 import sys
 import subprocess
 import venv
 from pathlib import Path
-import importlib.util
-from urllib.error import URLError
 
 def create_virtual_environment(env_dir):
     """Create a virtual environment for the addon"""
@@ -60,38 +59,43 @@ def install_dependencies(env_dir):
             with open(env_example, 'r') as example, open(env_file, 'w') as env:
                 env.write(example.read())
             print(".env file created. Please edit it to add your API keys.")
-        
+
         print("Dependencies installed successfully!")
 
-        # Attempt to download the Whisper 'small' model
-        print("\nAttempting to download Whisper 'small' model (this may take a while)...")
-        try:
-            # Dynamically import whisper after installation
-            spec = importlib.util.spec_from_file_location(
-                "whisper", env_dir / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages" / "whisper" / "__init__.py"
-            )
-            if spec and spec.loader:
-                 whisper = importlib.util.module_from_spec(spec)
-                 sys.modules["whisper"] = whisper # Add to sys.modules for subsequent imports if needed
-                 spec.loader.exec_module(whisper)
-                 print("Loading Whisper model...")
-                 whisper.load_model("small")
-                 print("Whisper 'small' model downloaded/loaded successfully.")
-            else:
-                 print("Could not dynamically load the whisper library after installation.")
-                 raise ImportError("Whisper library spec not found.")
+        # Run whisper_test.py to trigger model download
+        whisper_test_script = Path(__file__).parent / "whisper_test.py"
+        if whisper_test_script.exists():
+            print("\nRunning Whisper test script to download/verify the 'small' model...")
+            print("(This may take a moment and requires microphone access)...")
+            try:
+                # Use subprocess.run for better control and error checking
+                result = subprocess.run(
+                    [str(python_path), str(whisper_test_script)],
+                    check=True, # Raise CalledProcessError on failure
+                    capture_output=True, # Capture stdout/stderr
+                    text=True, # Decode output as text
+                    cwd=Path(__file__).parent # Run from the addon directory
+                )
+                print("Whisper test script ran successfully.")
+                # Optionally print stdout/stderr if needed for debugging, but can be verbose
+                # print("Whisper Test Output:\n", result.stdout)
+                # if result.stderr:
+                #     print("Whisper Test Errors:\n", result.stderr)
 
-        except (URLError, OSError, ImportError, Exception) as e: # Catch potential download/filesystem/import errors
-            print("\n--- Whisper Model Download Failed ---")
-            print(f"Error encountered: {e}")
-            print("Could not automatically download the Whisper 'small' model.")
-            print("This might be due to network issues, firewall restrictions, insufficient disk space, or permissions.")
-            print(f"Whisper models are typically stored in: {os.path.expanduser('~/.cache/whisper')}")
-            print("Please ensure you have a stable internet connection and write permissions to the cache directory.")
-            print("You can try downloading the model manually later by running a Python script with:")
-            print("  import whisper")
-            print("  whisper.load_model('small')")
-            # Don't return False here, setup can continue, but warn the user.
+            except subprocess.CalledProcessError as e:
+                print("\n--- Whisper Test Script Failed ---")
+                print(f"Error running whisper_test.py: {e}")
+                print("The Whisper 'small' model might not have been downloaded correctly.")
+                print("Please check the output above for errors from the script.")
+                print("You may need to run 'python whisper_test.py' manually to diagnose.")
+                print("Common issues include missing ffmpeg, microphone access problems, or network errors during download.")
+                # Continue setup, but warn the user
+            except FileNotFoundError:
+                 print(f"\nError: Could not find whisper_test.py at {whisper_test_script}")
+
+        else:
+            print(f"\nWarning: whisper_test.py not found at {whisper_test_script}. Skipping model download check.")
+
 
         print("\nNote: If using the Whisper method, ensure ffmpeg is installed on your system.")
         print("(e.g., 'sudo apt install ffmpeg' or 'brew install ffmpeg' or 'choco install ffmpeg')")

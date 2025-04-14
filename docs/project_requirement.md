@@ -43,17 +43,48 @@ The following table outlines the detailed functional requirements:
 | NFR006         | Scalability        | The architecture should handle increasingly complex commands and potentially more users (if applicable).                                             | **Partial**            | Client-server helps. Scalability mainly limited by Gemini's ability to generate complex scripts and Blender's performance.          |
 | NFR007         | Maintainability    | Code should be well-structured, commented, and follow conventions for ease of future development and debugging.                                    | **Needs Review/Improvement** | Code structure exists. Requires review for clarity, comments, and adherence to Python best practices.                                  |
 
-**4. Testing Requirements (TR)**
+**4. Testing Strategy**
 
-| Requirement ID | Description                   | Testing Method                             | Expected Outcome                                                                            | Status          | Notes                                                                                                                            |
-| :------------- | :---------------------------- | :----------------------------------------- | :------------------------------------------------------------------------------------------ | :-------------- | :------------------------------------------------------------------------------------------------------------------------------- |
-| TR001          | Microphone Functionality Test | Manual Execution (`microphone_test.py`)    | Script should detect microphones, capture audio, and ideally perform a basic transcription. | **Done (Basic)** | `microphone_test.py` exists. Useful for initial setup diagnosis.                                                               |
-| TR002          | Unit Tests                    | Automated (Pytest)                       | Test critical functions in isolation (e.g., `process_with_gemini`, API key validation).       | **Done**        | Added unit tests for `standalone_voice_server` (Gemini/STT logic) and `blender_voice_client` (socket/threading logic) using `pytest` and mocking. |
-| TR003          | Integration Tests             | Automated/Manual (Pytest/Manual Execution) | Verify communication between `blender_voice_client` and `standalone_voice_server`. Test message formats (JSON). | **Done (Basic)** | Added basic integration tests simulating socket message exchange between client and server using `pytest` and mocking.             |
-| TR004          | End-to-End (E2E) Tests        | Manual Execution                           | User speaks command -> Blender performs action correctly. Test various commands (create, move, modify). | **Done (Manual)** | Performed manual E2E tests for core commands (create, select, transform) confirming basic pipeline functionality. Further error case testing needed. |
-| TR005          | Usability Testing             | Manual Execution (User Feedback)           | Gather feedback from team members or peers on ease of use, clarity of UI and feedback.       | **Planned**     | Important for demonstrating user value.                                                                                          |
-| TR006          | Performance Testing           | Manual Execution (Timing)                  | Measure time from voice command end to Blender action completion for sample commands.         | **Planned**     | Provides data for NFR002.                                                                                                        |
-| TR007          | Error Handling Testing        | Manual Execution                           | Test scenarios like invalid API key, no internet, microphone issues, invalid voice commands.  | **Planned**     | Verify that errors are handled gracefully and reported to the user (relies on FR013 improvements).                              |
+The project employs a multi-level testing strategy to ensure functionality, reliability, and usability, drawing upon concepts from standard software testing practices.
+
+*   **Unit Testing:**
+    *   **Goal:** Verify individual functions and classes within `blender_voice_client.py` and `src/standalone_voice_server.py` in isolation.
+    *   **Focus:** Test specific logic like socket handling, message parsing (client), audio transcription, Gemini API interaction, error handling (server), API key validation.
+    *   **Techniques:** Primarily White Box Testing. Aim for reasonable Statement and Branch Coverage.
+    *   **Tools:** `pytest` test runner, `unittest.mock` for isolating dependencies (sockets, APIs).
+    *   **Status:** Basic unit tests exist for core server and client logic (TR002). Further expansion planned.
+
+*   **Integration Testing:**
+    *   **Goal:** Verify the interaction and data exchange between the `blender_voice_client` and the `standalone_voice_server`.
+    *   **Focus:** Test the socket communication protocol (JSON message formats), connection establishment/teardown, sending commands/audio (simulated), receiving status updates, and script transmission.
+    *   **Techniques:** Combination of Black Box (testing message formats) and White Box (understanding interaction points).
+    *   **Tools:** `pytest`, potentially using mocking for external APIs but testing the actual socket communication flow.
+    *   **Status:** Basic integration tests simulating message exchange exist (TR003). Further expansion planned.
+
+*   **System Testing:**
+    *   **Goal:** Verify the complete end-to-end workflow from the user's perspective within the Blender environment (or simulation). Validate functional requirements (FRs).
+    *   **Focus:** Test core user stories: Start listening -> Speak command -> See status updates -> Observe correct action in Blender. Test various command types (object creation, modification, selection) and error conditions (invalid command, API failure, network issues).
+    *   **Techniques:** Primarily Black Box Testing (Equivalence Class Partitioning for command types, Boundary Value Analysis for parameters if applicable, Error Guessing for environmental factors).
+    *   **Tools:** Manual execution within Blender.
+    *   **Status:** Manual E2E testing performed for core pipeline (TR004). Error handling testing planned (TR007).
+
+*   **Acceptance Testing:**
+    *   **Goal:** Confirm the system meets the project team's needs and usability expectations. Validate non-functional requirements like Usability (NFR001) and Performance (NFR002).
+    *   **Focus:** User-driven testing in the actual Blender environment using real voice commands. Gather feedback on ease of use, responsiveness, and clarity of feedback. Measure command execution times.
+    *   **Techniques:** Exploratory Testing, Usability Testing scenarios.
+    *   **Tools:** Manual execution, user feedback collection, timing measurements.
+    *   **Status:** Planned (TR005, TR006).
+
+*   **Regression Testing:**
+    *   **Goal:** Ensure that new changes or bug fixes do not negatively impact existing functionality.
+    *   **Technique:** Re-run automated Unit and Integration test suites (`pytest`) frequently after code modifications. Re-test relevant manual System test cases.
+    *   **Status:** Automated tests provide a foundation. Needs consistent execution discipline.
+
+*   **Setup/Diagnostic Testing:**
+    *   **Goal:** Verify basic environment setup and hardware functionality.
+    *   **Technique:** Manual execution of diagnostic scripts.
+    *   **Tools:** `microphone_test.py`.
+    *   **Status:** Done (Basic) (TR001).
 
 ---
 
@@ -76,10 +107,14 @@ The following table outlines the detailed functional requirements:
     *   **Why?** Allowed delivery of core, usable functionality (voice -> script -> execution pipeline) early (Increment 1: FR001-FR011). This provides a working base for demonstration and further development. It makes testing easier as each increment can be tested individually. It fits well with developing complex features like Local Processing (FR012) or Advanced Error Handling (FR013) in subsequent increments.
 
 4.  **Testing Methods Used:**
-    *   Mention the testing types from the TR section.
-    *   **Actual Done:** Manual diagnosis (`microphone_test.py` - TR001). Manual E2E testing during development (implicitly TR004).
-    *   **Why these methods?** `microphone_test.py` was essential for basic hardware setup validation. Manual E2E testing was necessary to verify the core workflow during development. *Crucially, state that you plan to add Unit (TR002) and Integration (TR003) tests for improved reliability and maintainability, even if basic.*
-    *   **Suggestion:** Try to add *at least one or two simple unit tests* using `pytest` (e.g., test the `process_with_gemini` function with mock input/output) so you can concretely say you *used* unit testing.
+    *   Refer to the **Testing Strategy** section (Section 4) above for a detailed breakdown of the levels (Unit, Integration, System, Acceptance) and techniques (White Box, Black Box, etc.) employed.
+    *   **Why these methods?** This multi-level approach ensures comprehensive verification:
+        *   **Unit Tests (White Box):** Verify the correctness of individual code components in isolation, catching bugs early using `pytest` and mocking. Essential for maintainability.
+        *   **Integration Tests:** Verify the communication and data exchange between the client and server, ensuring they work together correctly.
+        *   **System Tests (Black Box):** Validate the end-to-end user workflow against functional requirements, ensuring the system behaves as expected from a user's perspective.
+        *   **Acceptance Tests:** Confirm the system meets user needs and non-functional requirements like usability and performance through manual, user-centric testing.
+        *   **Regression Testing:** Automated unit/integration tests provide a safety net against introducing new bugs when modifying code.
+    *   **Status:** Basic automated unit and integration tests exist and provide a foundation for regression testing. Manual system testing has verified the core pipeline. Acceptance and further error testing are planned.
 
 5.  **Testing Results:**
     *   Report the outcome of `microphone_test.py`.
