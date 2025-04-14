@@ -445,6 +445,37 @@ def send_text_command(text, callback=None):
              callback({"status": "error", "message": f"Error sending text command: {e}"})
         return False
 
+# --- New Function: Send Execution Error ---
+def send_execution_error(request_id, error_type, error_message, callback=None):
+    """Send script execution error details back to the server."""
+    global client_socket
+    if not client_socket:
+        print("[CLIENT ERROR] Cannot send execution error: Not connected to server.")
+        if callback: callback({"status": "error", "message": "Cannot send execution error: Not connected"})
+        return False
+    try:
+        message_data = {
+            "type": "execution_error",
+            "request_id": request_id,
+            "error_type": error_type,
+            "error_message": error_message
+        }
+        message = json.dumps(message_data)
+        client_socket.sendall(message.encode())
+        print(f"[CLIENT INFO] Sent execution error for request_id: {request_id}")
+        # No specific callback needed here usually, but available
+        if callback: callback({"status": "info", "message": "Execution error sent"})
+        return True
+    except socket.error as e:
+        print(f"[CLIENT ERROR] Socket error sending execution error for {request_id}: {e}")
+        if callback: callback({"status": "error", "message": f"Socket error sending execution error: {e}"})
+        return False
+    except Exception as e:
+        print(f"[CLIENT ERROR] Error sending execution error for {request_id}: {e}")
+        if callback: callback({"status": "error", "message": f"Error sending execution error: {e}"})
+        return False
+# --- End New Function ---
+
 
 # For testing as standalone script
 if __name__ == "__main__":

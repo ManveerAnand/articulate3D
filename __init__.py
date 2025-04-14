@@ -214,7 +214,8 @@ def process_voice_client_message(context, message):
 
                 # Process the script (or lack thereof)
                 if script_content:
-                    script_queue.append((script_content, command_text)) # Queue with the determined command_text
+                    # Queue script, transcription, AND request_id
+                    script_queue.append((script_content, command_text, request_id))
                     update_console(context, f"Received script for '{command_text}' - queued.")
                 else:
                     # Script generation failed on the server side
@@ -273,23 +274,15 @@ def execute_scripts_timer():
     context = bpy.context
     needs_redraw = False
     if script_queue:
-        script_to_execute, transcription = script_queue.pop(0) # transcription should now be more reliable
-        logger.debug(f"Dequeued script for transcription: '{transcription}'") # Log transcription clearly
+        # Unpack script, transcription, AND request_id
+        script_to_execute, transcription, request_id = script_queue.pop(0)
+        logger.debug(f"Dequeued script for transcription: '{transcription}' (Request ID: {request_id})")
         status = 'Unknown'
         entry_timestamp = time.time() # Use consistent timestamp
-        original_area = context.area # Store original area for logging
-
-        # --- Optional Warning for bpy.ops + area=None ---
-        if original_area is None and "bpy.ops" in script_to_execute:
-             logger.warning(f"Context area is None before executing script for '{transcription}' containing 'bpy.ops'. Operators may fail silently.")
-             # Optionally update console as well:
-             # update_console(context, f"Warning: Context area is None, script with 'bpy.ops' may fail.")
-        # --- End Warning ---
-
         try:
-            # Log the context before execution
-            logger.info(f"Context before exec: area={original_area.type if original_area else 'None'}, window={context.window.screen.name if context.window else 'None'}, mode={context.mode if hasattr(context, 'mode') else 'N/A'}")
-            update_console(context, f"Executing script for: {transcription}") # Use the transcription directly
+            # Log context before execution
+            logger.info(f"Context before exec: area={context.area.type if context.area else 'None'}, window={context.window.screen.name if context.window else 'None'}, mode={context.mode if hasattr(context, 'mode') else 'N/A'}")
+            update_console(context, f"Executing script for: {transcription}")
 
             # Execute the script
             exec(script_to_execute, {"bpy": bpy})
@@ -298,12 +291,30 @@ def execute_scripts_timer():
             update_console(context, f"Script for '{transcription}' executed successfully.")
         except Exception as e:
             status = 'Script Error'
-            ui_error_msg = f"Script Execution Error for '{transcription}': {type(e).__name__} - {str(e)}"
-            # Use exc_info=True for detailed traceback in the log file
-            logger.error(f"Script Execution Error for '{transcription}':", exc_info=True)
-            update_console(context, ui_error_msg) # Show simplified error in UI console
+            error_type = type(e).__name__
+            error_message = str(e)
+            ui_error_msg = f"Script Execution Error for '{transcription}': {error_type} - {error_message}"
+            # Log detailed traceback
+            logger.error(f"Script Execution Error for '{transcription}' (Request ID: {request_id}):", exc_info=True)
+            update_console(context, ui_error_msg)
 
-        # Always add to history, even if transcription was a placeholder
+            # --- Send error back to server ---
+            try:
+                import sys, os
+                addon_dir = os.path.dirname(os.path.abspath(__file__))
+                if addon_dir not in sys.path: sys.path.insert(0, addon_dir)
+                import blender_voice_client
+                # Check if the function exists before calling (it will be added next)
+                if hasattr(blender_voice_client, 'send_execution_error'):
+                    logger.info(f"Sending execution error details back to server for request {request_id}...")
+                    blender_voice_client.send_execution_error(request_id, error_type, error_message)
+                else:
+                    logger.warning("blender_voice_client.send_execution_error function not found yet.")
+            except Exception as send_err:
+                logger.error(f"Failed to send execution error to server: {send_err}", exc_info=True)
+            # --- End error sending ---
+
+        # Always add to history
         entry = {
             'transcription': transcription, 'status': status,
             'script': script_to_execute, 'timestamp': entry_timestamp,
