@@ -97,12 +97,26 @@ A multi-level testing strategy was implemented to ensure code quality and functi
 ## Testing Results
 
 *   **Automated Tests:** The automated Unit and Integration test suite (`pytest`) consisting of 50 tests **passed** successfully, verifying core component logic and communication protocols.
-*   **Manual System & Acceptance Tests:**
-    *(Please fill in results after executing scenarios. Include:*
-    *   *Summary of manual E2E command tests (e.g., "Tested 12 commands including creation, selection, movement, rotation, scaling, modifiers. 11/12 succeeded. Failure on 'bevel edges' due to complex selection context.")*
-    *   *Performance results (e.g., "Simple commands (create cube, move) averaged 3.5 seconds latency. Modifier commands averaged 6 seconds.")*
-    *   *Usability feedback (e.g., "UI is clear, history is useful, wake word occasionally misfires in noisy environment.")*
-    *   *Error handling observations (e.g., "Invalid API key correctly reported. Script errors shown in console and history.")*)
+*   **Manual System & Acceptance Tests:** The following table summarizes the results obtained from executing the manual test scenarios defined in project documentation.
+
+    | Feature Tested                   | Description                                      | Expected Result                                                                 | Actual Result | Status (Pass/Fail) |
+    | :------------------------------- | :----------------------------------------------- | :------------------------------------------------------------------------------ | :------------ | :----------------- |
+    | **System Tests**                 |                                                  |                                                                                 |               |                    |
+    | Create Primitive (SYS-001)       | Speak "create a cube"                            | Cube added at origin; Console shows success status.                             |               |                    |
+    | Select Object (SYS-003)          | Speak "select the cube" (after deselecting all)  | Cube becomes active selection; Console shows success status.                    |               |                    |
+    | Transform Object (SYS-004)       | Speak "move it x 2" (with cube selected)         | Cube moves 2 units on X-axis; Console shows success status.                     |               |                    |
+    | Add Modifier (SYS-007)           | Speak "add subdivision surface modifier"         | Subdivision modifier added to selected object; Console shows success status.    |               |                    |
+    | Invalid API Key (SYS-009)        | Attempt command with incorrect API key           | Command fails; Console shows API key related error.                             |               |                    |
+    | Invalid Command (SYS-012)        | Speak ambiguous command like "make it awesome"   | Command fails; Console shows "Cannot be processed" or similar error.            |               |                    |
+    | Script Execution Error (SYS-014) | Speak command generating invalid script        | Command fails; Console & History show script execution error details.           |               |                    |
+    | **Acceptance Tests**             |                                                  |                                                                                 |               |                    |
+    | Basic Workflow (ACC-001)         | Model simple object using only voice commands    | Task completion possible; Subjective feedback on intuitiveness/frustration.     |               |                    |
+    | Command Latency (ACC-002/003)    | Time simple and complex commands                 | Average latency within acceptable range (e.g., <5s simple, <10s complex).       |               |                    |
+    | Feedback Clarity (ACC-004)       | Observe UI/console feedback for various actions  | Feedback is clear, timely, and accurate for success, errors, status changes.    |               |                    |
+    | Error Recovery (ACC-005)         | Intentionally trigger errors and try to recover  | System handles errors gracefully without crashing; User can correct and resume. |               |                    |
+    | Command History (ACC-006)        | Use history features (review, re-run, star)      | History is accurate; Re-run and star functions work as expected.                |               |                    |
+
+    *(Note: Please complete the 'Actual Result' and 'Status' columns based on actual test execution.)*
 
 ---
 

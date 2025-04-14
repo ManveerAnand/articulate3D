@@ -15,9 +15,11 @@ def install_dependencies(env_dir):
     if sys.platform == "win32":
         python_path = env_dir / "Scripts" / "python.exe"
         pip_path = env_dir / "Scripts" / "pip.exe"
+        activate_script = env_dir / "Scripts" / "activate.bat"
     else:
         python_path = env_dir / "bin" / "python"
         pip_path = env_dir / "bin" / "pip"
+        activate_script = env_dir / "bin" / "activate"
 
     if not python_path.exists():
         print(f"Error: Python executable not found at {python_path}")
@@ -37,7 +39,8 @@ def install_dependencies(env_dir):
             "google-cloud-speech",
             "sounddevice",
             "numpy",
-            "pytest"
+            "pytest",
+            "ffmpeg-python"  # Added ffmpeg-python for audio processing
         ]
 
         print("Installing required dependencies...")
@@ -48,6 +51,45 @@ def install_dependencies(env_dir):
             except subprocess.CalledProcessError as e:
                 print(f"Warning: Failed to install {dep}: {e}")
                 continue
+
+        # Special handling for vosk
+        print("\nInstalling vosk...")
+        try:
+            # First try installing from PyPI
+            subprocess.check_call([str(python_path), "-m", "pip", "install", "vosk"])
+        except subprocess.CalledProcessError:
+            print("Failed to install vosk from PyPI, trying alternative methods...")
+            try:
+                # Try installing from GitHub
+                subprocess.check_call([str(python_path), "-m", "pip", "install", "git+https://github.com/alphacep/vosk-api.git"])
+            except subprocess.CalledProcessError:
+                print("Failed to install vosk from GitHub, trying pre-built wheel...")
+                try:
+                    # Try installing pre-built wheel for Windows
+                    if sys.platform == "win32":
+                        subprocess.check_call([str(python_path), "-m", "pip", "install", "https://github.com/alphacep/vosk-api/releases/download/v0.3.45/vosk-0.3.45-cp39-cp39-win_amd64.whl"])
+                except subprocess.CalledProcessError:
+                    print("Failed to install vosk. Some speech recognition features may not work.")
+
+        # Download Vosk model files
+        print("\nDownloading Vosk model files...")
+        model_dir = Path(_file_).parent / "models" / "vosk-model-small-en-us"
+        if not model_dir.exists():
+            model_dir.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                import urllib.request
+                import zipfile
+                print("Downloading small English model...")
+                model_url = "https://alphacep.cn/vosk/models/vosk-model-small-en-us-0.15.zip"
+                model_zip = model_dir.parent / "vosk-model-small-en-us-0.15.zip"
+                urllib.request.urlretrieve(model_url, model_zip)
+                with zipfile.ZipFile(model_zip, 'r') as zip_ref:
+                    zip_ref.extractall(model_dir.parent)
+                model_zip.unlink()  # Remove the zip file after extraction
+                print("Vosk model files downloaded successfully.")
+            except Exception as e:
+                print(f"Failed to download Vosk model files: {e}")
+                print("You can manually download the model from: https://alphacep.cn/vosk/models/")
 
         env_file = Path(_file_).parent / ".env"
         env_example = Path(_file_).parent / ".env.example"
@@ -78,6 +120,7 @@ def install_dependencies(env_dir):
             print(f"\nWarning: whisper_test.py not found at {whisper_test_script}. Skipping model download check.")
 
         print("\nNote: If using the Whisper method, ensure ffmpeg is installed on your system.")
+        print("You can install ffmpeg using: https://ffmpeg.org/download.html")
         return True
 
     except subprocess.CalledProcessError as e:
