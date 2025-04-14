@@ -120,6 +120,11 @@ class VoiceCommandProperties(bpy.types.PropertyGroup):
     console_output: bpy.props.StringProperty(name="Console Output", default="Ready...", maxlen=1024)
     show_history: bpy.props.BoolProperty(name="Show Command History", default=True)
     show_starred: bpy.props.BoolProperty(name="Show Starred Commands", default=False)
+    edit_script: bpy.props.BoolProperty(
+        name="Edit Script",
+        description="Open generated script in text editor for modification",
+        default=False
+    )
 
 # --- Core Functions ---
 def update_console(context, text):
@@ -128,12 +133,36 @@ def update_console(context, text):
     logger.info(text)
 
 def handle_script(context, script):
+    """Handle a script received from the voice recognition server"""
     try:
-        script_queue.append(script)
-        update_console(context, f"Received script to execute")
+        # Store the script in a text block named "Generated Script"
+        text_name = "Generated Script"
+        if text_name not in bpy.data.texts:
+            text = bpy.data.texts.new(text_name)
+        else:
+            text = bpy.data.texts[text_name]
+        
+        # Clear and set the new script
+        text.clear()
+        text.write(script)
+        
+        # If edit_script is False, execute immediately
+        props = context.scene.voice_command_props
+        if not props.edit_script:
+            try:
+                exec(script)
+                update_console(context, "Script executed successfully")
+            except Exception as e:
+                update_console(context, f"Error executing script: {str(e)}")
+                logger.error(f"Error executing script: {str(e)}", exc_info=True)
+        else:
+            update_console(context, "Script stored in text editor. Click 'Execute Script' to run it.")
+        
+        return True
     except Exception as e:
-        logger.error(f"Error handling script: {str(e)}", exc_info=True)
         update_console(context, f"Error handling script: {str(e)}")
+        logger.error(f"Error handling script: {str(e)}", exc_info=True)
+        return False
 
 def process_voice_client_message(context, message):
     global last_transcription, command_history
@@ -199,10 +228,30 @@ def execute_scripts_timer():
         status = 'Unknown'
         entry_timestamp = time.time() # Use consistent timestamp
         try:
+            # Store the script in a text block
+            text_name = "Generated Script"
+            if text_name not in bpy.data.texts:
+                text = bpy.data.texts.new(text_name)
+            else:
+                text = bpy.data.texts[text_name]
+            
+            # Clear and set the new script
+            text.clear()
+            text.write(script_to_execute)
+            
             logger.info(f"Attempting to execute script:\n---\n{script_to_execute}\n---")
             logger.info(f"Context before exec: area={context.area.type if context.area else 'None'}, window={context.window.screen.name if context.window else 'None'}, mode={context.mode if hasattr(context, 'mode') else 'N/A'}")
             update_console(context, f"Executing script for: {transcription or 'Unknown command'}")
-            exec(script_to_execute, {"bpy": bpy})
+            
+            # Create a custom namespace that includes bpy and our update_console function
+            namespace = {
+                "bpy": bpy,
+                "update_console": lambda msg: update_console(context, msg)
+            }
+            
+            # Execute the script with our custom namespace
+            exec(script_to_execute, namespace)
+            
             status = 'Success'
             update_console(context, "Script executed successfully.")
         except Exception as e:
@@ -515,6 +564,107 @@ class BLENDER_OT_delete_history_command(bpy.types.Operator):
             self.report({'ERROR'}, error_msg)
             return {'CANCELLED'}
 
+class BLENDER_OT_run_script(bpy.types.Operator):
+    bl_idname = "wm.run_script"
+    bl_label = "Run Script"
+    bl_description = "Execute the script in the text editor"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        props = context.scene.voice_command_props
+        script = props.script_text
+        
+        if not script.strip():
+            self.report({'WARNING'}, "No script to execute")
+            return {'CANCELLED'}
+        
+        try:
+            # Execute the script
+            exec(script)
+            self.report({'INFO'}, "Script executed successfully")
+            return {'FINISHED'}
+        except Exception as e:
+            self.report({'ERROR'}, f"Error executing script: {str(e)}")
+            return {'CANCELLED'}
+
+class BLENDER_OT_open_stored_script(bpy.types.Operator):
+    bl_idname = "wm.open_stored_script"
+    bl_label = "Edit Last Script"
+    bl_description = "Open the last executed script in the text editor"
+    
+    def execute(self, context):
+        try:
+            # Find a text editor
+            text_editor = None
+            for area in context.screen.areas:
+                if area.type == 'TEXT_EDITOR':
+                    text_editor = area
+                    break
+            
+            if text_editor is None:
+                # No text editor found, create one by splitting the current area
+                current_area = context.area
+                bpy.ops.screen.area_split(direction='VERTICAL', factor=0.3)
+                
+                # The new area is always the last one in the areas list
+                text_editor = context.screen.areas[-1]
+                text_editor.type = 'TEXT_EDITOR'
+            
+            # Find the text block
+            text_name = "Generated Script"
+            if text_name not in bpy.data.texts:
+                self.report({'ERROR'}, "No script found to edit")
+                return {'CANCELLED'}
+            
+            text = bpy.data.texts[text_name]
+            
+            # Set the text block as active
+            text_editor.spaces.active.text = text
+            
+            # Set cursor position and selection
+            text.cursor_set(0)
+            
+            return {'FINISHED'}
+        except Exception as e:
+            self.report({'ERROR'}, f"Error opening script: {str(e)}")
+            return {'CANCELLED'}
+
+class BLENDER_OT_execute_text_script(bpy.types.Operator):
+    bl_idname = "wm.execute_text_script"
+    bl_label = "Execute Script"
+    bl_description = "Execute the current script in the text editor"
+    
+    def execute(self, context):
+        try:
+            text_name = "Generated Script"
+            if text_name not in bpy.data.texts:
+                self.report({'ERROR'}, "No script found in text editor")
+                return {'CANCELLED'}
+            
+            text = bpy.data.texts[text_name]
+            script = text.as_string()
+            
+            if not script.strip():
+                self.report({'WARNING'}, "No script to execute")
+                return {'CANCELLED'}
+            
+            # Create namespace with access to bpy and update_console
+            namespace = {
+                "bpy": bpy,
+                "update_console": lambda msg: update_console(context, msg)
+            }
+            
+            # Execute the script with our namespace
+            exec(script, namespace)
+            update_console(context, "Script executed successfully")
+            self.report({'INFO'}, "Script executed successfully")
+            return {'FINISHED'}
+        except Exception as e:
+            error_msg = f"Error executing script: {str(e)}"
+            update_console(context, error_msg)
+            self.report({'ERROR'}, error_msg)
+            return {'CANCELLED'}
+
 # --- Panel ---
 class BLENDER_PT_voice_command_panel(bpy.types.Panel):
     bl_label = "Voice Command Panel"
@@ -527,143 +677,69 @@ class BLENDER_PT_voice_command_panel(bpy.types.Panel):
         layout = self.layout
         props = context.scene.voice_command_props
         
-        # ... (API Config, Status, Console, Command Buttons, Help - remain the same) ...
-        # API Configuration
-        api_box = layout.box()
-        api_box.label(text="Configuration:", icon="SETTINGS")
-        api_box.prop(props, "api_key")
+        # API Key and Model Selection
+        box = layout.box()
+        box.label(text="Configuration")
+        box.prop(props, "api_key")
+        box.prop(props, "selected_model")
         
-        # Status
-        status_box = layout.box()
-        status_row = status_box.row()
-        status_row.label(text="Status:")
-        if props.is_listening:
-            status_row.label(text="Listening...", icon="RADIOBUT_ON")
-        else:
-            status_row.label(text="Ready", icon="RADIOBUT_OFF")
-        
-        # Console output
-        console_box = layout.box()
-        console_box.label(text="Console Output:", icon="CONSOLE")
-        console_box.prop(props, "console_output")
-        console_box.prop(props, "selected_model")
-        
-        # Command buttons
-        buttons_row = layout.row(align=True)
-        buttons_row.enabled = bool(props.api_key)
-        buttons_row.scale_y = 2.0
-        
-        # Start button
+        # Voice Control Buttons
+        box = layout.box()
+        box.label(text="Voice Control")
+        row = box.row()
         if not props.is_listening:
-            start_btn = buttons_row.operator("wm.voice_command", text="Start Voice Command", icon="REC")
-        # Stop button
+            row.operator("wm.voice_command", text="Start Listening", icon='PLAY')
         else:
-            stop_btn = buttons_row.operator("wm.stop_voice_command", text="Stop Voice Command", icon="PAUSE")
+            row.operator("wm.stop_voice_command", text="Stop Listening", icon='PAUSE')
         
-        if not props.api_key:
-            layout.label(text="⚠️ Please enter API key first", icon="ERROR")
+        # Console Output
+        box = layout.box()
+        box.label(text="Console")
+        box.prop(props, "console_output", text="")
         
-        # Help section
-        help_box = layout.box()
-        help_box.label(text="Voice Command Examples:", icon="QUESTION")
-        help_box.label(text="• Create a red cube")
-        help_box.label(text="• Add a smooth sphere")
-        help_box.label(text="• Move object up 2 units")
-
-
-        # Command History section (Collapsible)
-        history_box = layout.box()
-        row = history_box.row()
-        row.prop(props, "show_history", text="Command History", icon="TIME", emboss=False)
-        # TODO: Add Starred Popup Button Here
-        # row.operator("wm.show_starred_popup", text="", icon='SOLO_ON') # Example
-
-        if not props.show_history: # Show only when collapsed
-            col = history_box.column(align=True)
-            if not command_history:
-                col.label(text="No commands yet.")
-            else:
-                # Display ALL entries (newest first)
-                for i, entry in enumerate(reversed(command_history)):
-                    row = col.row(align=True)
-                    status = entry.get('status', 'Unknown')
-                    transcription = entry.get('transcription', 'N/A')
-                    script = entry.get('script')
-                    original_index = len(command_history) - 1 - i # Index in the current deque
-
-                    status_icon = "CHECKMARK" if 'Success' in status else "ERROR" if 'Error' in status or 'Failed' in status else "INFO"
-                    star_icon = 'SOLO_ON' if entry.get('starred', False) else 'SOLO_OFF'
-
-                    # Use split factor to manage layout
-                    split = row.split(factor=0.75) # Adjust factor as needed
-
-                    # Command text/button
-                    if script:
-                        op = split.operator("wm.execute_history_command", text=f"{transcription}", icon=status_icon)
-                        op.history_index = original_index
-                        op.is_starred_execution = False # Executing from main history
-                    else:
-                        split.label(text=f"{transcription}", icon=status_icon)
-
-                    # Status label and buttons
-                    row_right = split.row(align=True)
-                    row_right.alignment = 'RIGHT'
-                    row_right.label(text=f"({status})")
-                    # Star button
-                    star_op = row_right.operator("wm.toggle_star_history_command", text="", icon=star_icon)
-                    star_op.history_index = original_index
-                    # Delete button
-                    del_op = row_right.operator("wm.delete_history_command", text="", icon='TRASH')
-                    del_op.history_index = original_index
-
-
-        # --- Starred Commands Section (Collapsible) ---
-        starred_box = layout.box()
-        row = starred_box.row()
-        row.prop(props, "show_starred", text="Starred Commands", icon="SOLO_ON", emboss=False)
-
-        if not props.show_starred: # Show only when collapsed
-            col_starred = starred_box.column(align=True)
-            if not starred_commands:
-                col_starred.label(text="No starred commands yet.")
-            else:
-                # Iterate through the separate starred list
-                for i, entry in enumerate(starred_commands):
-                    row_starred = col_starred.row(align=True)
-                    transcription = entry.get('transcription', 'N/A')
-                    script = entry.get('script')
-                    entry_timestamp = entry.get('timestamp') # Get timestamp to find original index
-
-                    # Find original index in command_history (needed for execution/unstarring)
-                    # This might be fragile if history clears often. Consider storing index if needed.
-                    original_index = find_history_entry_by_timestamp(entry_timestamp)
-
-                    if script and original_index != -1:
-                         # Execute button (uses original index)
-                        op = row_starred.operator("wm.execute_history_command", text=f"{transcription}", icon='PLAY')
-                        op.history_index = original_index
-                        op.is_starred_execution = True # Mark as starred execution
-
-                        # Unstar button (uses original index)
-                        unstar_op = row_starred.operator("wm.toggle_star_history_command", text="", icon='SOLO_ON')
-                        unstar_op.history_index = original_index
-                    elif script: # Script exists but original history entry might be gone
-                         row_starred.label(text=f"{transcription} (History Cleared?)", icon='PLAY')
-                         # Simple remove from starred list operator needed here?
-                         # For now, unstar still works if we pass the index *within starred_commands*
-                         # This requires modifying the toggle operator or adding a new one.
-                         # Let's stick to modifying toggle for now, passing a flag?
-                         # Or maybe store the original index *in* the starred entry?
-                         # Simplest for now: just show unstar, it will fail gracefully if index is bad
-                         unstar_op = row_starred.operator("wm.toggle_star_history_command", text="", icon='SOLO_ON')
-                         unstar_op.history_index = original_index # This index is wrong now...
-                         # TODO: Fix unstarring if original history item is gone.
-                    else:
-                        row_starred.label(text=f"{transcription} (No Script)", icon='ERROR')
-                        # Unstar button (index might be wrong here too)
-                        unstar_op = row_starred.operator("wm.toggle_star_history_command", text="", icon='SOLO_ON')
-                        unstar_op.history_index = original_index
-
+        # Script Options
+        box = layout.box()
+        box.label(text="Script Options", icon='TEXT')
+        
+        # Edit script option
+        box.prop(props, "edit_script", text="Edit Script Before Execution")
+        
+        # Edit last script button
+        edit_row = box.row()
+        edit_btn = edit_row.operator("wm.open_stored_script", text="Edit Last Script", icon="TEXT")
+        edit_row.enabled = "Generated Script" in bpy.data.texts
+        
+        # Execute script button
+        execute_row = box.row()
+        execute_btn = execute_row.operator("wm.execute_text_script", text="Execute Script", icon="PLAY")
+        execute_row.enabled = "Generated Script" in bpy.data.texts
+        
+        # History Section
+        box = layout.box()
+        row = box.row()
+        row.prop(props, "show_history", text="Command History", icon='TIME')
+        
+        if props.show_history:
+            for i, entry in enumerate(command_history):
+                row = box.row()
+                if entry.get('starred'):
+                    row.operator("wm.toggle_star_history_command", text="", icon='SOLO_ON', emboss=False).history_index = i
+                else:
+                    row.operator("wm.toggle_star_history_command", text="", icon='SOLO_OFF', emboss=False).history_index = i
+                
+                row.operator("wm.execute_history_command", text=entry.get('transcription', 'Unknown')).history_index = i
+                row.operator("wm.delete_history_command", text="", icon='X', emboss=False).history_index = i
+        
+        # Starred Commands Section
+        box = layout.box()
+        row = box.row()
+        row.prop(props, "show_starred", text="Starred Commands", icon='SOLO_ON')
+        
+        if props.show_starred and starred_commands:
+            for i, entry in enumerate(starred_commands):
+                row = box.row()
+                row.operator("wm.execute_history_command", text=entry.get('transcription', 'Unknown')).history_index = i
+                row.operator("wm.delete_history_command", text="", icon='X', emboss=False).history_index = i
 
 # --- Registration ---
 classes = (
@@ -673,45 +749,86 @@ classes = (
     BLENDER_OT_execute_history_command,
     BLENDER_OT_toggle_star_history_command, # Register star operator
     BLENDER_OT_delete_history_command,
+    BLENDER_OT_run_script,
+    BLENDER_OT_open_stored_script,
+    BLENDER_OT_execute_text_script,
     BLENDER_PT_voice_command_panel,
 )
 
 def register():
-    try:
-        for cls in classes:
-            bpy.utils.register_class(cls)
-        bpy.types.Scene.voice_command_props = bpy.props.PointerProperty(type=VoiceCommandProperties)
-        # ... (rest of register remains the same) ...
-        try:
-            env_path = Path(__file__).parent / '.env'
-            if env_path.exists():
-                with open(env_path, 'r') as file:
-                    content = file.read()
-                    match = re.search(r'GEMINI_API_KEY=([^\n\r]*)', content)
-                    if match and match.group(1) and match.group(1) != 'your_gemini_api_key_here':
-                        try:
-                            if hasattr(bpy.context, 'scene'):
-                                bpy.context.scene.voice_command_props.api_key = match.group(1)
-                            elif hasattr(bpy.data, 'scenes') and bpy.data.scenes:
-                                for scene in bpy.data.scenes:
-                                    scene.voice_command_props.api_key = match.group(1)
-                        except AttributeError:
-                            logger.warning("Could not set API key to scenes - will be loaded from .env when needed")
-        except Exception as env_error:
-            logger.error(f"Error loading API key from .env: {str(env_error)}", exc_info=True)
-        logger.info("Articulate 3D Add-on registered successfully!")
-    except Exception as e:
-        logger.critical(f"Error registering Articulate 3D Add-on: {str(e)}", exc_info=True)
-
+    bpy.utils.register_class(VoiceCommandProperties)
+    bpy.types.Scene.voice_command_props = bpy.props.PointerProperty(type=VoiceCommandProperties)
+    
+    bpy.utils.register_class(BLENDER_OT_voice_command)
+    bpy.utils.register_class(BLENDER_OT_stop_voice_command)
+    bpy.utils.register_class(BLENDER_OT_execute_history_command)
+    bpy.utils.register_class(BLENDER_OT_toggle_star_history_command)
+    bpy.utils.register_class(BLENDER_OT_delete_history_command)
+    bpy.utils.register_class(BLENDER_OT_run_script)
+    bpy.utils.register_class(BLENDER_OT_open_stored_script)
+    bpy.utils.register_class(BLENDER_OT_execute_text_script)
+    bpy.utils.register_class(BLENDER_PT_voice_command_panel)
+    
+    # Start the script execution timer
+    bpy.app.timers.register(execute_scripts_timer, persistent=True)
+    
+    logger.info("Articulate 3D Add-on registered successfully!")
 
 def unregister():
+    # Stop the script execution timer
+    bpy.app.timers.unregister(execute_scripts_timer)
+    
+    bpy.utils.unregister_class(BLENDER_PT_voice_command_panel)
+    bpy.utils.unregister_class(BLENDER_OT_run_script)
+    bpy.utils.unregister_class(BLENDER_OT_delete_history_command)
+    bpy.utils.unregister_class(BLENDER_OT_toggle_star_history_command)
+    bpy.utils.unregister_class(BLENDER_OT_execute_history_command)
+    bpy.utils.unregister_class(BLENDER_OT_stop_voice_command)
+    bpy.utils.unregister_class(BLENDER_OT_voice_command)
+    bpy.utils.unregister_class(BLENDER_OT_open_stored_script)
+    bpy.utils.unregister_class(BLENDER_OT_execute_text_script)
+    
+    del bpy.types.Scene.voice_command_props
+    bpy.utils.unregister_class(VoiceCommandProperties)
+
+def create_monkey():
+    """Creates a Suzanne monkey mesh object."""
     try:
-        for cls in reversed(classes):
-            bpy.utils.unregister_class(cls)
-        del bpy.types.Scene.voice_command_props
-        logger.info("Articulate 3D Add-on unregistered.")
+        # Create the monkey mesh data
+        mesh = bpy.data.meshes.new("Monkey_Mesh")
+        monkey_object = bpy.data.objects.new("Monkey", mesh)
+
+        # Link the object to the scene
+        scene = bpy.context.scene
+        scene.collection.link_instance(monkey_object)
+
+        # Generate the Suzanne data
+        bpy.ops.mesh.primitive_monkey_add(size=1, enter_editmode=False, align='WORLD', location=(0, 0, 0), rotation=(0, 0, 0))
+        
+        # Get the newly created monkey object
+        new_monkey = bpy.context.active_object
+
+        # Copy the mesh data from the newly created monkey to our monkey object
+        monkey_object.data = new_monkey.data
+
+        # Remove the temporary monkey object
+        bpy.data.objects.remove(new_monkey, do_unlink=True)
+
+        update_console("Monkey created successfully!")
+        return monkey_object
+
     except Exception as e:
-        logger.error(f"Error unregistering Articulate 3D Add-on: {str(e)}", exc_info=True)
+        update_console(f"Error creating monkey: {e}")
+        return None
+
+def main():
+    """Main function to execute the monkey creation."""
+    try:
+        monkey = create_monkey()
+        if monkey:
+            update_console("Monkey creation completed!")
+    except Exception as e:
+        update_console(f"An error occurred: {e}")
 
 if __name__ == "__main__":
     register()
