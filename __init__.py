@@ -191,7 +191,7 @@ def process_voice_client_message(context, message):
                     logger.error(f"Failed to send context response for {request_id}: {e}", exc_info=True)
                     update_console(context, f"Error sending context: {e}")
 
-            elif status == "transcribed": # This might be replaced by request_context message now
+            elif status == "transcribed":
                 last_transcription = msg_text.replace("Transcribed: ", "").strip()
                 update_console(context, f"Server: {msg_text}")
             elif status == "script":
@@ -278,7 +278,7 @@ def execute_scripts_timer():
         script_to_execute, transcription, request_id = script_queue.pop(0)
         logger.debug(f"Dequeued script for transcription: '{transcription}' (Request ID: {request_id})")
         status = 'Unknown'
-        entry_timestamp = time.time() # Use consistent timestamp
+        entry_timestamp = time.time()
         try:
             # Log context before execution
             logger.info(f"Context before exec: area={context.area.type if context.area else 'None'}, window={context.window.screen.name if context.window else 'None'}, mode={context.mode if hasattr(context, 'mode') else 'N/A'}")
@@ -304,12 +304,12 @@ def execute_scripts_timer():
                 addon_dir = os.path.dirname(os.path.abspath(__file__))
                 if addon_dir not in sys.path: sys.path.insert(0, addon_dir)
                 import blender_voice_client
-                # Check if the function exists before calling (it will be added next)
                 if hasattr(blender_voice_client, 'send_execution_error'):
                     logger.info(f"Sending execution error details back to server for request {request_id}...")
                     blender_voice_client.send_execution_error(request_id, error_type, error_message)
                 else:
-                    logger.warning("blender_voice_client.send_execution_error function not found yet.")
+                    # This case should ideally not happen if client is updated
+                    logger.warning("blender_voice_client.send_execution_error function not found.")
             except Exception as send_err:
                 logger.error(f"Failed to send execution error to server: {send_err}", exc_info=True)
             # --- End error sending ---
@@ -339,8 +339,9 @@ def execute_scripts_timer():
 class BLENDER_OT_voice_command(bpy.types.Operator):
     bl_idname = "wm.voice_command"
     bl_label = "Start Voice Command"
-    # ... (validate_api_key remains the same) ...
+
     def validate_api_key(self, api_key):
+        """Checks if the provided Gemini API key is valid by making a simple request."""
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
             response = requests.get(url)
@@ -657,7 +658,6 @@ class BLENDER_PT_voice_command_panel(bpy.types.Panel):
         layout = self.layout
         props = context.scene.voice_command_props
         
-        # ... (API Config, Status, Console, Command Buttons, Help - remain the same) ...
         # API Configuration
         api_box = layout.box()
         api_box.label(text="Configuration:", icon="SETTINGS")
@@ -815,7 +815,7 @@ def register():
         for cls in classes:
             bpy.utils.register_class(cls)
         bpy.types.Scene.voice_command_props = bpy.props.PointerProperty(type=VoiceCommandProperties)
-        # ... (rest of register remains the same) ...
+        # Attempt to load API key from .env file on registration
         try:
             env_path = Path(__file__).parent / '.env'
             if env_path.exists():

@@ -1,8 +1,11 @@
 import os
+import os
 import sys
 import subprocess
 import venv
 from pathlib import Path
+import importlib.util
+from urllib.error import URLError
 
 def create_virtual_environment(env_dir):
     """Create a virtual environment for the addon"""
@@ -59,9 +62,41 @@ def install_dependencies(env_dir):
             print(".env file created. Please edit it to add your API keys.")
         
         print("Dependencies installed successfully!")
+
+        # Attempt to download the Whisper 'small' model
+        print("\nAttempting to download Whisper 'small' model (this may take a while)...")
+        try:
+            # Dynamically import whisper after installation
+            spec = importlib.util.spec_from_file_location(
+                "whisper", env_dir / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages" / "whisper" / "__init__.py"
+            )
+            if spec and spec.loader:
+                 whisper = importlib.util.module_from_spec(spec)
+                 sys.modules["whisper"] = whisper # Add to sys.modules for subsequent imports if needed
+                 spec.loader.exec_module(whisper)
+                 print("Loading Whisper model...")
+                 whisper.load_model("small")
+                 print("Whisper 'small' model downloaded/loaded successfully.")
+            else:
+                 print("Could not dynamically load the whisper library after installation.")
+                 raise ImportError("Whisper library spec not found.")
+
+        except (URLError, OSError, ImportError, Exception) as e: # Catch potential download/filesystem/import errors
+            print("\n--- Whisper Model Download Failed ---")
+            print(f"Error encountered: {e}")
+            print("Could not automatically download the Whisper 'small' model.")
+            print("This might be due to network issues, firewall restrictions, insufficient disk space, or permissions.")
+            print(f"Whisper models are typically stored in: {os.path.expanduser('~/.cache/whisper')}")
+            print("Please ensure you have a stable internet connection and write permissions to the cache directory.")
+            print("You can try downloading the model manually later by running a Python script with:")
+            print("  import whisper")
+            print("  whisper.load_model('small')")
+            # Don't return False here, setup can continue, but warn the user.
+
         print("\nNote: If using the Whisper method, ensure ffmpeg is installed on your system.")
         print("(e.g., 'sudo apt install ffmpeg' or 'brew install ffmpeg' or 'choco install ffmpeg')")
         return True
+
     except subprocess.CalledProcessError as e:
         print(f"Error installing dependencies: {e}")
         return False
