@@ -215,7 +215,7 @@ def format_blender_context(context_data):
 
     return "\n".join(parts)
 
-# --- AI Processing Functions (Refactored) ---
+# --- AI Processing Functions (Refactored for Chat) ---
 DEFAULT_GENERATION_CONFIG = {
     "temperature": 0.2,
     "top_p": 0.8,
@@ -229,106 +229,98 @@ DEFAULT_SAFETY_SETTINGS = [
     {'category': 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold': 'BLOCK_MEDIUM_AND_ABOVE'},
 ]
 
-def process_text_with_gemini(text: str, model_name: str, blender_context: dict = None):
-    """Initializes model and processes text with Gemini, passing configs to generate_content."""
-    logger.debug(f"[Text] Processing with Gemini model: {model_name}")
-    if 'google.generativeai' not in sys.modules:
-        logger.error("[Text] google.generativeai module not available.")
+def process_text_with_chat(chat_session, text_command: str, blender_context: dict = None):
+    """Processes text using the provided chat session."""
+    if not chat_session:
+        logger.error("[Chat Text] No chat session provided.")
         return None
 
     context_info = format_blender_context(blender_context)
-    # logger.debug(f"[Text] Using context: {context_info}") # Included in prompt
-
-    # Check if the input 'text' already contains retry instructions
-    if "**Previous Script Failed Execution in Blender:**" in text or \
-       "**Previous Generation Attempt Failed:**" in text:
-        # If it's a retry prompt, use it directly
-        prompt = text
-        logger.debug("[Text] Using provided text as full retry prompt.")
-    else:
-        # Otherwise, build the standard initial prompt
-        prompt = f"""
-You are a Blender 4.x Python script generator.
-Translate the following command into a `bpy` Python script compatible with Blender 4.x.
+    # Construct the message to send, including current context
+    # The chat history is managed by the chat_session object itself
+    prompt = f"""
+**Command:** {text_command}
+**Current Blender Context:**
+{context_info}
 
 **Instructions:**
 1.  **Output Python Code Only:** Your response must contain ONLY the Python script. Do not include ```python, explanations, comments, introductions, or any other text.
 2.  **Use Blender 4.x API:** Ensure the script uses `bpy` commands compatible with Blender 4.x.
 3.  **Prioritize `bpy.data`:** Whenever possible, use the `bpy.data` API for creating/manipulating objects, meshes, materials, etc. It is more robust than `bpy.ops` when run from scripts. Only use `bpy.ops` if `bpy.data` is not suitable for the specific task.
-
-**Command:** {text}
-**Current Blender Context:**
-{context_info}
-
-**Script:**
+4.  **Consider History:** Remember previous commands and responses in this chat session to understand context like "it", "that object", etc.
+5.  **Handle Errors:** If the command is unclear, too complex, or requires `bpy.ops` in an unsafe way, output ONLY the comment: `# Error: Command cannot be processed.`
 """
+    # Add retry prompt logic if needed (can be integrated here or in the calling function)
+    if "**Previous Script Failed Execution in Blender:**" in text_command or \
+       "**Previous Generation Attempt Failed:**" in text_command:
+        prompt = text_command # Use the full retry prompt passed in
+        logger.debug("[Chat Text] Using provided text as full retry prompt for chat.")
+
 
     try:
-        logger.debug(f"[Text] Initializing GenerativeModel: {model_name}")
-        model = genai.GenerativeModel(model_name)
-        logger.debug(f"[Text] Model initialized: {type(model)}")
-
-        logger.debug(f"[Text] Calling generate_content with configs...")
-        response = model.generate_content(
-            contents=prompt,
+        logger.debug(f"[Chat Text] Sending message to chat session...")
+        # Send the combined prompt/context to the existing chat session
+        response = chat_session.send_message(
+            prompt,
             generation_config=DEFAULT_GENERATION_CONFIG,
             safety_settings=DEFAULT_SAFETY_SETTINGS
         )
-        logger.debug(f"[Text] generate_content response received.")
+        logger.debug(f"[Chat Text] Chat response received.")
 
         script = ""
+        # Accessing response text might differ slightly for chat sessions
         if hasattr(response, 'parts') and response.parts:
-            # Check if text attribute exists before accessing
             if hasattr(response.parts[0], 'text'):
                  script = response.parts[0].text.strip()
             else:
-                 logger.warning("[Text] Response part exists but has no 'text' attribute.")
+                 logger.warning("[Chat Text] Response part exists but has no 'text' attribute.")
         elif hasattr(response, 'text'):
-            script = response.text.strip()
+             script = response.text.strip()
         else:
-            logger.warning("[Text] Gemini response has no 'parts' or 'text'. Checking feedback.")
+            logger.warning("[Chat Text] Chat response has no 'parts' or 'text'. Checking feedback.")
             if hasattr(response, 'prompt_feedback') and hasattr(response.prompt_feedback, 'block_reason'):
                 block_reason = response.prompt_feedback.block_reason
                 safety_ratings = response.prompt_feedback.safety_ratings
-                logger.warning(f"[Text] Request blocked: {block_reason}. Ratings: {safety_ratings}")
+                logger.warning(f"[Chat Text] Request blocked: {block_reason}. Ratings: {safety_ratings}")
                 script = f"# Error: Content blocked by API ({block_reason})"
             else:
-                logger.warning(f"[Text] Unknown response structure: {response}")
-                script = "# Error: Could not parse Gemini response."
+                logger.warning(f"[Chat Text] Unknown response structure: {response}")
+                script = "# Error: Could not parse chat response."
 
-        # Stricter validation: Check for None, empty/whitespace-only, or containing '# Error:'
+        # Stricter validation
         if not script or not script.strip() or "# Error:" in script:
-             logger.warning(f"[Text] Gemini returned an invalid/error script: '{script}'")
-             return None # Explicitly return None for invalid scripts
+             logger.warning(f"[Chat Text] Chat returned an invalid/error script: '{script}'")
+             return None
 
-        logger.info("[Text] Received valid (non-error, non-empty) script from Gemini.")
+        logger.info("[Chat Text] Received valid script from chat session.")
         return script
 
     except Exception as e:
-        logger.error(f"[Text] Error during Gemini API call or processing for model '{model_name}': {type(e).__name__} - {e}", exc_info=True)
+        logger.error(f"[Chat Text] Error during chat session send_message: {type(e).__name__} - {e}", exc_info=True)
         return None
 
 
-def process_audio_with_gemini(audio_bytes: bytes, model_name: str, blender_context: dict = None, mime_type: str = "audio/wav") -> str | None:
-    """Initializes model and processes audio with Gemini, passing configs to generate_content."""
-    logger.debug(f"[Audio] Processing with Gemini model: {model_name}")
-    if 'google.generativeai' not in sys.modules:
-        logger.error("[Audio] google.generativeai module not available.")
+def process_audio_with_chat(chat_session, audio_bytes: bytes, blender_context: dict = None, mime_type: str = "audio/wav") -> str | None:
+    """Processes audio using the provided chat session (for initial audio command)."""
+    # Note: Retries for audio commands will likely fall back to process_text_with_chat
+    #       using the transcribed text and error context.
+    if not chat_session:
+        logger.error("[Chat Audio] No chat session provided.")
         return None
+
+    logger.debug(f"[Chat Audio] Processing audio command with chat session.")
 
     context_info = format_blender_context(blender_context)
-    # logger.debug(f"[Audio] Using context: {context_info}") # Included in prompt
-
+    # Construct the prompt part of the message
     prompt = f"""
-You are a Blender 4.x Python script generator.
 Listen to the following audio command and translate it into a `bpy` Python script compatible with Blender 4.x.
 
 **Instructions:**
 1.  **Output Python Code Only:** Your response must contain ONLY the Python script. Do not include ```python, explanations, comments, introductions, or any other text.
 2.  **Use Blender 4.x API:** Ensure the script uses `bpy` commands compatible with Blender 4.x.
 3.  **Prioritize `bpy.data`:** Whenever possible, use the `bpy.data` API for creating/manipulating objects, meshes, materials, etc. It is more robust than `bpy.ops` when run from scripts. Only use `bpy.ops` if `bpy.data` is not suitable for the specific task.
-4.  **Handle Errors:** If the command is unclear, too complex to translate reliably, or potentially unsafe, output ONLY the following line:
-    `# Error: Command cannot be processed.`
+4.  **Consider History:** Remember previous commands and responses in this chat session.
+5.  **Handle Errors:** If the command is unclear, too complex, or requires `bpy.ops` in an unsafe way, output ONLY the comment: `# Error: Command cannot be processed.`
 
 **Current Blender Context:**
 {context_info}
@@ -337,66 +329,63 @@ Listen to the following audio command and translate it into a `bpy` Python scrip
 """
 
     try:
+        # Prepare the audio part
         audio_part = None
         if hasattr(genai, 'types') and hasattr(genai.types, 'Part'):
-            logger.debug("[Audio] Using genai.types.Part for audio.")
             audio_part = genai.types.Part.from_data(data=audio_bytes, mime_type=mime_type)
         else:
-            logger.warning("[Audio] genai.types.Part not found. Using dictionary format for audio.")
-            # Most APIs expect data as base64 in JSON payloads
             audio_part = {"mime_type": mime_type, "data": base64.b64encode(audio_bytes).decode('utf-8')}
 
         if not audio_part:
-             logger.error("[Audio] Failed to create audio part for Gemini.")
+             logger.error("[Chat Audio] Failed to create audio part for Gemini.")
              return None
 
+        # Combine prompt and audio data for the message
         contents_list = [prompt, audio_part]
 
-        logger.debug(f"[Audio] Initializing GenerativeModel: {model_name}")
-        model = genai.GenerativeModel(model_name)
-        logger.debug(f"[Audio] Model initialized: {type(model)}")
-
-        logger.debug(f"[Audio] Calling generate_content with configs...")
-        response = model.generate_content(
-            contents=contents_list,
+        logger.debug(f"[Chat Audio] Sending message (prompt + audio) to chat session...")
+        response = chat_session.send_message(
+            contents_list,
             generation_config=DEFAULT_GENERATION_CONFIG,
             safety_settings=DEFAULT_SAFETY_SETTINGS
         )
-        logger.debug(f"[Audio] generate_content response received.")
+        logger.debug(f"[Chat Audio] Chat response received.")
 
         script = ""
+        # Accessing response text (same logic as text processing)
         if hasattr(response, 'parts') and response.parts:
             if hasattr(response.parts[0], 'text'):
                  script = response.parts[0].text.strip()
             else:
-                 logger.warning("[Audio] Response part exists but has no 'text' attribute.")
+                 logger.warning("[Chat Audio] Response part exists but has no 'text' attribute.")
         elif hasattr(response, 'text'):
-            script = response.text.strip()
+             script = response.text.strip()
         else:
-            logger.warning("[Audio] Gemini response has no 'parts' or 'text'. Checking feedback.")
+            logger.warning("[Chat Audio] Chat response has no 'parts' or 'text'. Checking feedback.")
             if hasattr(response, 'prompt_feedback') and hasattr(response.prompt_feedback, 'block_reason'):
                 block_reason = response.prompt_feedback.block_reason
                 safety_ratings = response.prompt_feedback.safety_ratings
-                logger.warning(f"[Audio] Request blocked: {block_reason}. Ratings: {safety_ratings}")
+                logger.warning(f"[Chat Audio] Request blocked: {block_reason}. Ratings: {safety_ratings}")
                 script = f"# Error: Content blocked by API ({block_reason})"
             else:
-                logger.warning(f"[Audio] Unknown response structure: {response}")
-                script = "# Error: Could not parse Gemini response."
+                logger.warning(f"[Chat Audio] Unknown response structure: {response}")
+                script = "# Error: Could not parse chat response."
 
-        # Stricter validation: Check for None, empty/whitespace-only, or containing '# Error:'
+        # Stricter validation
         if not script or not script.strip() or "# Error:" in script:
-             logger.warning(f"[Audio] Gemini returned an invalid/error script: '{script}'")
-             return None # Explicitly return None for invalid scripts
+             logger.warning(f"[Chat Audio] Chat returned an invalid/error script: '{script}'")
+             return None
 
-        logger.info("[Audio] Received valid (non-error, non-empty) script from Gemini.")
+        logger.info("[Chat Audio] Received valid script from chat session.")
         return script
 
     except Exception as e:
-        logger.error(f"[Audio] Error during Gemini API call or processing for model '{model_name}': {type(e).__name__} - {e}", exc_info=True)
+        logger.error(f"[Chat Audio] Error during chat session send_message for audio: {type(e).__name__} - {e}", exc_info=True)
         return None
 
 
 # --- Transcription Functions ---
+# (Keep transcribe_with_whisper and transcribe_with_google_stt as they are)
 whisper_model_cache = {}
 
 def transcribe_with_whisper(audio_bytes: bytes) -> str | None:
@@ -852,6 +841,11 @@ def client_message_handler_thread(conn: socket.socket, addr):
                     try: del client_configs[conn]
                     except KeyError: pass
                     logger.debug(f"[{addr}] Removed client config during cleanup.")
+                # Also clear chat session for this client
+                if conn in client_chat_sessions:
+                    try: del client_chat_sessions[conn]
+                    except KeyError: pass
+                    logger.debug(f"[{addr}] Removed client chat session during cleanup.")
 
                 requests_to_remove = [req_id for req_id, data in pending_context_requests.items() if data.get('conn') == conn]
                 for req_id in requests_to_remove:
@@ -874,8 +868,26 @@ def client_message_handler_thread(conn: socket.socket, addr):
                     model_name = client_message.get("model")
                     method = client_message.get("method")
                     if model_name and method:
+                        # Store config first
                         client_configs[conn] = {"model_name": model_name, "method": method}
                         logger.info(f"[{addr}] Client configured: Model={model_name}, Method={method}")
+
+                        # --- Initialize or Reset Chat Session ---
+                        try:
+                            logger.info(f"[{addr}] Initializing/Resetting chat session for model: {model_name}")
+                            model = genai.GenerativeModel(model_name)
+                            # Start a fresh chat session each time configuration happens
+                            chat = model.start_chat(history=[])
+                            client_chat_sessions[conn] = chat # Store the session object
+                            logger.info(f"[{addr}] Chat session initialized/reset successfully.")
+                        except Exception as chat_init_err:
+                            logger.error(f"[{addr}] Failed to initialize chat session: {chat_init_err}", exc_info=True)
+                            # Clear any potentially old session if init fails
+                            if conn in client_chat_sessions: del client_chat_sessions[conn]
+                            # Inform client? For now, just log error. Addon might fail later.
+                            pass
+
+                        # --- Send Confirmation ---
                         try:
                             conn.sendall(json.dumps({"status": "info", "message": f"Configuration received (Model: {model_name}, Method: {method})"}).encode())
                             logger.debug(f"[{addr}] Successfully sent config confirmation.")
@@ -920,6 +932,16 @@ def client_message_handler_thread(conn: socket.socket, addr):
                         original_text = pending_data.get('text') # For whisper/google_stt
                         audio_bytes = pending_data.get('audio_bytes') # For gemini direct audio
                         max_retries = 2 # Attempt 1 + 1 retry
+
+                        # --- Get Chat Session ---
+                        chat_session = client_chat_sessions.get(conn)
+                        if not chat_session:
+                             logger.error(f"[{addr}] No chat session found for connection during context response {request_id}. Cannot proceed.")
+                             # Send error back to client?
+                             try:
+                                 conn.sendall(json.dumps({"status":"error", "message":"Chat session missing on server.", "request_id": request_id, "original_text": original_text}).encode())
+                             except: pass
+                             continue # Skip processing this request
 
                         for attempt in range(max_retries):
                             logger.info(f"[{addr}] Script generation attempt {attempt + 1}/{max_retries} for request {request_id} (Method: {method})")
@@ -982,24 +1004,19 @@ The previous attempt to generate a script for the command '{original_command_tex
 """
                                 # --- End Generation Failure Retry Prompt ---
 
-                            # --- Call appropriate Gemini function ---
-                            # Note: We now always use process_text_with_gemini for retries,
-                            # as we construct a text prompt including the error context.
-                            # The original audio is not re-sent on retry.
+                            # --- Call appropriate Gemini function using CHAT SESSION ---
                             if method == "gemini" and not is_retry: # First attempt with direct audio
                                 if audio_bytes:
-                                    script = process_audio_with_gemini(audio_bytes, model_name, received_context)
+                                    script = process_audio_with_chat(chat_session, audio_bytes, received_context) # Use chat function
                                 else:
                                     logger.error(f"[{addr}] No audio data in pending request {request_id} for Gemini method on attempt {attempt + 1}.")
                                     script = None # Ensure script is None if no audio
                                     break # No point retrying if audio is missing
-                            # Corrected indentation and logic flow for text/retry (elif should align with if)
                             elif method in ["whisper", "google_stt"] or is_retry: # Use text prompt for transcription methods or any retry
                                 text_input_for_gemini = prompt_for_gemini if is_retry else original_text
-                                # Corrected indentation for the inner if
                                 if text_input_for_gemini:
                                     # Pass the full prompt if retrying, otherwise just the original text
-                                    script = process_text_with_gemini(text_input_for_gemini, model_name, received_context)
+                                    script = process_text_with_chat(chat_session, text_input_for_gemini, received_context) # Use chat function
                                 else:
                                     logger.error(f"[{addr}] No text input available for Gemini on attempt {attempt + 1} (Method: {method}, IsRetry: {is_retry}).")
                                     script = None
@@ -1054,7 +1071,7 @@ The previous attempt to generate a script for the command '{original_command_tex
                 elif msg_type == "process_text":
                     text_to_process = client_message.get("text")
                     context_for_text = client_message.get("context")
-                    request_id_text = str(uuid.uuid4())
+                    request_id_text = str(uuid.uuid4()) # Generate ID for this text request
 
                     if conn not in client_configs:
                          logger.warning(f"[{addr}] Received 'process_text' but client not configured. Ignoring.")
@@ -1062,39 +1079,63 @@ The previous attempt to generate a script for the command '{original_command_tex
                          except: pass
                          continue
 
+                    # --- Get Chat Session ---
+                    chat_session = client_chat_sessions.get(conn)
+                    if not chat_session:
+                         logger.error(f"[{addr}] No chat session found for connection during process_text {request_id_text}. Cannot proceed.")
+                         try:
+                             conn.sendall(json.dumps({"status":"error", "message":"Chat session missing on server.", "request_id": request_id_text, "original_text": text_to_process}).encode())
+                         except: pass
+                         continue
+
                     config = client_configs[conn]
-                    model_name = config.get('model_name')
+                    model_name = config.get('model_name') # Model name needed for logging/potential future use
 
                     if text_to_process and model_name:
-                        logger.info(f"[{addr}] Processing direct text command (ID: {request_id_text})...")
+                        logger.info(f"[{addr}] Processing direct text command via chat (ID: {request_id_text})...")
                         script = None
-                        max_retries_text = 2
+                        max_retries_text = 2 # Keep retry logic for generation failures
 
                         for attempt_text in range(max_retries_text):
                             logger.info(f"[{addr}] Text script generation attempt {attempt_text + 1}/{max_retries_text} for request {request_id_text}")
                             prompt_for_gemini_text = ""
                             is_retry_text = False
 
-                            # Check for reported execution error for this text command ID
-                            # Note: Text commands get a new ID each time, so this error check
-                            # needs refinement. We'd need to store the text command's request_id
-                            # temporarily if we want to link execution errors back to it.
-                            # For now, we only retry on initial generation failure for text commands.
-                            # reported_error_text = execution_errors.pop(request_id_text, None)
+                            # Check for reported execution error (less likely for text, but possible)
+                            reported_error_text = execution_errors.pop(request_id_text, None)
 
-                            if attempt_text > 0: # Retry only on initial generation failure for now
+                            if reported_error_text:
+                                is_retry_text = True
+                                logger.info(f"[{addr}] Retrying text request {request_id_text} due to reported execution error.")
+                                error_type = reported_error_text['error_type']
+                                error_msg = reported_error_text['error_message']
+                                prompt_for_gemini_text = f"""
+**Previous Script Failed Execution in Blender:**
+The script generated for the command '{text_to_process}' failed with the following error:
+```
+{error_type}: {error_msg}
+```
+**Please analyze the original command and the execution error, then generate a corrected Blender 4.x Python script.**
+
+**Instructions:** (Same as before - prioritize bpy.data, etc.)
+1.  **Fix the Error:** Address the specific `{error_type}` reported.
+2.  **Output Python Code Only:** Your response must contain ONLY the Python script.
+3.  **Use Blender 4.x API.**
+4.  **Prioritize `bpy.data`.**
+
+**Original Command:** {text_to_process}
+**Current Blender Context:**
+{format_blender_context(context_for_text)}
+
+**Corrected Script:**
+"""
+                            elif attempt_text > 0: # Retry on initial generation failure
                                 is_retry_text = True
                                 logger.info(f"[{addr}] Retrying text request {request_id_text} due to initial generation failure.")
                                 prompt_for_gemini_text = f"""
 **Previous Generation Attempt Failed:**
 The previous attempt to generate a script for the command '{text_to_process}' failed (returned no script or an error comment).
-
-**Please analyze the original command and try again to generate a valid Blender 4.x Python script.**
-
-**Instructions:**
-1.  **Output Python Code Only:** Your response must contain ONLY the Python script. Do not include ```python, explanations, comments, introductions, or any other text.
-2.  **Use Blender 4.x API:** Ensure the script uses `bpy` commands compatible with Blender 4.x.
-3.  **Prioritize `bpy.data`:** Whenever possible, use the `bpy.data` API for creating/manipulating objects, meshes, materials, etc. It is more robust than `bpy.ops` when run from scripts. Only use `bpy.ops` if `bpy.data` is not suitable for the specific task.
+**Please analyze the original command and try again.** (Instructions remain the same)
 
 **Original Command:** {text_to_process}
 **Current Blender Context:**
@@ -1103,14 +1144,24 @@ The previous attempt to generate a script for the command '{text_to_process}' fa
 **Script:**
 """
                             else:
-                                # First attempt uses the standard prompt structure via process_text_with_gemini
-                                prompt_for_gemini_text = text_to_process # The function builds the full prompt
+                                # First attempt - construct standard prompt for text
+                                prompt_for_gemini_text = f"""
+**Command:** {text_to_process}
+**Current Blender Context:**
+{format_blender_context(context_for_text)}
 
-                            # Call Gemini (using the function which builds the standard prompt for attempt 0)
-                            # If retrying, we'd ideally pass the specific retry prompt here.
-                            # TODO: Refactor process_text_with_gemini to accept a full prompt override for retries.
-                            # For now, retry just calls it with the original text again.
-                            script = process_text_with_gemini(text_to_process, model_name, context_for_text)
+**Instructions:** (Same as before - prioritize bpy.data, etc.)
+1.  **Output Python Code Only.**
+2.  **Use Blender 4.x API.**
+3.  **Prioritize `bpy.data`.**
+4.  **Consider History:** Remember previous commands/responses in this chat.
+5.  **Handle Errors:** If unclear/complex, output `# Error: Command cannot be processed.`
+
+**Script:**
+"""
+
+                            # Call Gemini using the CHAT SESSION
+                            script = process_text_with_chat(chat_session, prompt_for_gemini_text, context_for_text) # Use chat function
 
 
                             # --- Check script validity ---
@@ -1143,7 +1194,7 @@ The previous attempt to generate a script for the command '{text_to_process}' fa
                             conn.sendall(json.dumps({
                                 "status": response_status_text, "message": response_message_text,
                                 "script": script, # Send None if script generation failed
-                                "request_id": request_id_text,
+                                "request_id": request_id_text, # Send the unique ID for this text request
                                 "original_text": text_to_process # Essential for history
                             }).encode())
                             # Log after successful send
@@ -1181,6 +1232,11 @@ The previous attempt to generate a script for the command '{text_to_process}' fa
                 try: del client_configs[conn]
                 except KeyError: pass
                 logger.debug(f"[{addr}] Removed client config during cleanup.")
+            # Also clear chat session for this client
+            if conn in client_chat_sessions:
+                try: del client_chat_sessions[conn]
+                except KeyError: pass
+                logger.debug(f"[{addr}] Removed client chat session during cleanup.")
 
             requests_to_remove = [req_id for req_id, data in pending_context_requests.items() if data.get('conn') == conn]
             for req_id in requests_to_remove:
@@ -1207,6 +1263,11 @@ The previous attempt to generate a script for the command '{text_to_process}' fa
                 try: del client_configs[conn]
                 except KeyError: pass
                 logger.debug(f"[{addr}] Removed client config during cleanup.")
+            # Also clear chat session for this client
+            if conn in client_chat_sessions:
+                try: del client_chat_sessions[conn]
+                except KeyError: pass
+                logger.debug(f"[{addr}] Removed client chat session during cleanup.")
 
             requests_to_remove = [req_id for req_id, data in pending_context_requests.items() if data.get('conn') == conn]
             for req_id in requests_to_remove:
@@ -1225,6 +1286,11 @@ The previous attempt to generate a script for the command '{text_to_process}' fa
         try: del client_configs[conn]
         except KeyError: pass
         logger.debug(f"[{addr}] Removed client config during final cleanup.")
+    # Also clear chat session for this client
+    if conn in client_chat_sessions:
+        try: del client_chat_sessions[conn]
+        except KeyError: pass
+        logger.debug(f"[{addr}] Removed client chat session during final cleanup.")
 
     requests_to_remove = [req_id for req_id, data in pending_context_requests.items() if data.get('conn') == conn]
     for req_id in requests_to_remove:
@@ -1344,7 +1410,7 @@ def start_standalone_voice_recognition_server():
         time.sleep(join_timeout)
 
         # Clear global state
-        pending_context_requests.clear(); client_configs.clear(); execution_errors.clear()
+        pending_context_requests.clear(); client_configs.clear(); execution_errors.clear(); client_chat_sessions.clear() # Added chat sessions cleanup
         logger.info("Server shutdown complete.")
 
 if __name__ == "__main__":
