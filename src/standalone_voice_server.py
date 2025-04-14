@@ -166,7 +166,8 @@ PORT = 65432
 stop_server = threading.Event()
 pending_context_requests = {} # request_id -> {data}
 client_configs = {} # conn -> {model_name, method} - NO model instance stored
-execution_errors = {} # request_id -> {"error_type": ..., "error_message": ...}
+execution_errors = {} # request_id -> {"error_type": ..., "error_message": ..., "conn": conn} # Store conn for cleanup
+client_chat_sessions = {} # conn -> Gemini ChatSession object # Added for future chat implementation
 
 # --- Wake Word & VAD Configuration ---
 VOSK_MODEL_PATH = str(Path(__file__).parent.parent / "models" / "vosk-model-small-en-us-0.15") # ADJUST PATH AS NEEDED
@@ -238,7 +239,15 @@ def process_text_with_gemini(text: str, model_name: str, blender_context: dict =
     context_info = format_blender_context(blender_context)
     # logger.debug(f"[Text] Using context: {context_info}") # Included in prompt
 
-    prompt = f"""
+    # Check if the input 'text' already contains retry instructions
+    if "**Previous Script Failed Execution in Blender:**" in text or \
+       "**Previous Generation Attempt Failed:**" in text:
+        # If it's a retry prompt, use it directly
+        prompt = text
+        logger.debug("[Text] Using provided text as full retry prompt.")
+    else:
+        # Otherwise, build the standard initial prompt
+        prompt = f"""
 You are a Blender 4.x Python script generator.
 Translate the following command into a `bpy` Python script compatible with Blender 4.x.
 
@@ -885,12 +894,10 @@ def client_message_handler_thread(conn: socket.socket, addr):
                     error_type = client_message.get("error_type", "UnknownType")
                     error_message = client_message.get("error_message", "Unknown error message.")
                     if request_id:
-                        execution_errors[request_id] = {"error_type": error_type, "error_message": error_message}
+                        # Store the error, associated with the request ID
+                        execution_errors[request_id] = {"error_type": error_type, "error_message": error_message, "conn": conn} # Store conn for cleanup
                         logger.warning(f"[{addr}] Received execution error report for request {request_id}: {error_type} - {error_message}")
-                        # Now, trigger the retry logic if this was the first attempt
-                        # We need to retrieve the original pending data to retry
-                        # This requires restructuring the retry logic slightly
-                        # For now, just store the error. Retry logic enhancement comes next.
+                        # The retry logic within context_response will now pick this up if needed.
                     else:
                         logger.error(f"[{addr}] Received execution_error message without a request_id: {client_message}")
                     # --- End Error Handling ---
@@ -1181,7 +1188,7 @@ The previous attempt to generate a script for the command '{text_to_process}' fa
                 except KeyError: pass
             if requests_to_remove: logger.debug(f"[{addr}] Removed {len(requests_to_remove)} pending context requests during cleanup.")
             # Also clear any execution errors for this client
-            errors_to_remove = [req_id for req_id in execution_errors if execution_errors[req_id].get('conn') == conn] # Assuming we store conn in error dict
+            errors_to_remove = [req_id for req_id, err_data in execution_errors.items() if err_data.get('conn') == conn]
             for req_id in errors_to_remove:
                  try: del execution_errors[req_id]
                  except KeyError: pass
@@ -1225,7 +1232,7 @@ The previous attempt to generate a script for the command '{text_to_process}' fa
         except KeyError: pass
     if requests_to_remove: logger.debug(f"[{addr}] Removed {len(requests_to_remove)} pending context requests during final cleanup.")
     # Also clear any execution errors for this client
-    errors_to_remove = [req_id for req_id in execution_errors if execution_errors[req_id].get('conn') == conn] # Assuming we store conn in error dict
+    errors_to_remove = [req_id for req_id, err_data in execution_errors.items() if err_data.get('conn') == conn]
     for req_id in errors_to_remove:
         try: del execution_errors[req_id]
         except KeyError: pass
