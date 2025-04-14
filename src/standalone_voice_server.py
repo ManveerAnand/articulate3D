@@ -171,7 +171,7 @@ client_chat_sessions = {} # conn -> Gemini ChatSession object # Added for future
 
 # --- Wake Word & VAD Configuration ---
 VOSK_MODEL_PATH = str(Path(__file__).parent.parent / "models" / "vosk-model-small-en-us-0.15") # ADJUST PATH AS NEEDED
-WAKE_WORDS = ["okay blender","pornhub"] # Add more if needed
+WAKE_WORDS = ["okay blender","okay listen"] # Add more if needed
 WAKE_WORD_JSON = json.dumps(WAKE_WORDS + ["[unk]"]) # For Vosk recognizer
 WAKE_WORD_JSON = json.dumps(WAKE_WORDS + ["[unk]"]) # For Vosk recognizer
 

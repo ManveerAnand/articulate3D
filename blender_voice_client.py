@@ -114,9 +114,11 @@ def start_voice_server():
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         )
         
-        # Give the server a moment to start up
+        # Give the server more time to start up, load models, and initialize audio
         import time
-        time.sleep(1)
+        print("[CLIENT INFO] Waiting 5 seconds for server to initialize...")
+        time.sleep(5) # Increased delay
+        print("[CLIENT INFO] Finished waiting for server.")
         
         return process
     except Exception as e:
