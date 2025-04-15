@@ -12,135 +12,98 @@ def create_virtual_environment(env_dir):
 
 def install_dependencies(env_dir):
     """Install required dependencies in the virtual environment"""
+    # Get the path to the Python executable in the virtual environment
     if sys.platform == "win32":
         python_path = env_dir / "Scripts" / "python.exe"
         pip_path = env_dir / "Scripts" / "pip.exe"
-        activate_script = env_dir / "Scripts" / "activate.bat"
     else:
         python_path = env_dir / "bin" / "python"
         pip_path = env_dir / "bin" / "pip"
-        activate_script = env_dir / "bin" / "activate"
-
+    
     if not python_path.exists():
         print(f"Error: Python executable not found at {python_path}")
         return False
 
+    print("Installing required dependencies...")
     try:
-        print("Upgrading pip, setuptools, and wheel...")
-        subprocess.check_call([str(python_path), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"])
+        # Install PyTorch CPU-only first
+        print("Installing PyTorch (CPU version)...")
+        subprocess.check_call([
+            str(python_path), "-m", "pip", "install",
+            "torch", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cpu"
+        ])
 
-        # Install dependencies one by one
-        dependencies = [
-            "python-dotenv",
-            "SpeechRecognition",
-            "PyAudio",
-            "google-genai",
-            "git+https://github.com/openai/whisper.git",  # Install directly from GitHub
-            "google-cloud-speech",
-            "sounddevice",
-            "numpy",
-            "pytest",
-            "ffmpeg-python"  # Added ffmpeg-python for audio processing
-        ]
-
-        print("Installing required dependencies...")
-        for dep in dependencies:
+        # Read requirements from requirements.txt
+        print("Reading dependencies from requirements.txt...")
+        requirements_path = Path(__file__).parent / "requirements.txt"
+        dependencies = []
+        if requirements_path.exists():
             try:
-                print(f"Installing {dep}...")
-                subprocess.check_call([str(python_path), "-m", "pip", "install", dep])
-            except subprocess.CalledProcessError as e:
-                print(f"Warning: Failed to install {dep}: {e}")
-                continue
-
-        # Special handling for vosk
-        print("\nInstalling vosk...")
-        try:
-            # First try installing from PyPI
-            subprocess.check_call([str(python_path), "-m", "pip", "install", "vosk"])
-        except subprocess.CalledProcessError:
-            print("Failed to install vosk from PyPI, trying alternative methods...")
-            try:
-                # Try installing from GitHub
-                subprocess.check_call([str(python_path), "-m", "pip", "install", "git+https://github.com/alphacep/vosk-api.git"])
-            except subprocess.CalledProcessError:
-                print("Failed to install vosk from GitHub, trying pre-built wheel...")
-                try:
-                    # Try installing pre-built wheel for Windows
-                    if sys.platform == "win32":
-                        subprocess.check_call([str(python_path), "-m", "pip", "install", "https://github.com/alphacep/vosk-api/releases/download/v0.3.45/vosk-0.3.45-cp39-cp39-win_amd64.whl"])
-                except subprocess.CalledProcessError:
-                    print("Failed to install vosk. Some speech recognition features may not work.")
-
-        # Download Vosk model files
-        print("\nDownloading Vosk model files...")
-        model_dir = Path(_file_).parent / "models" / "vosk-model-small-en-us"
-        if not model_dir.exists():
-            model_dir.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                import urllib.request
-                import zipfile
-                print("Downloading small English model...")
-                model_url = "https://alphacep.cn/vosk/models/vosk-model-small-en-us-0.15.zip"
-                model_zip = model_dir.parent / "vosk-model-small-en-us-0.15.zip"
-                urllib.request.urlretrieve(model_url, model_zip)
-                with zipfile.ZipFile(model_zip, 'r') as zip_ref:
-                    zip_ref.extractall(model_dir.parent)
-                model_zip.unlink()  # Remove the zip file after extraction
-                print("Vosk model files downloaded successfully.")
+                with open(requirements_path, 'r', encoding='utf-8-sig') as f: # Use utf-8-sig to handle potential BOM
+                    # Filter out comments, empty lines, and PyTorch/Torchaudio (installed separately)
+                    dependencies = [
+                        line.strip() for line in f
+                        if line.strip() and not line.startswith('#') and 'torch' not in line.lower()
+                    ]
+                print(f"Found {len(dependencies)} dependencies in requirements.txt (excluding torch).")
             except Exception as e:
-                print(f"Failed to download Vosk model files: {e}")
-                print("You can manually download the model from: https://alphacep.cn/vosk/models/")
+                print(f"Error reading requirements.txt: {e}")
+                # Decide if we should stop or continue with an empty list
+                # For now, let's print the error and continue with potentially empty list
+        else:
+            print(f"Warning: {requirements_path} not found. Cannot install dependencies from file.")
+            # Fallback to empty list or define essential defaults? Let's use empty for now.
 
-        env_file = Path(_file_).parent / ".env"
-        env_example = Path(_file_).parent / ".env.example"
+        # Install required packages using 'python -m pip' for better reliability
+        if dependencies: # Only run if we found dependencies
+            print("Installing dependencies from requirements.txt...")
+            subprocess.check_call([
+                str(python_path), "-m", "pip", "install",
+                *dependencies
+            ])
+        else:
+            print("No dependencies found in requirements.txt to install (excluding torch).")
+
+        # Create .env file if it doesn't exist
+        env_file = Path(__file__).parent / ".env"
+        env_example = Path(__file__).parent / ".env.example"
+        
         if not env_file.exists() and env_example.exists():
             print("\nCreating .env file from template...")
             with open(env_example, 'r') as example, open(env_file, 'w') as env:
                 env.write(example.read())
             print(".env file created. Please edit it to add your API keys.")
-
-        whisper_test_script = Path(_file_).parent / "whisper_test.py"
-        if whisper_test_script.exists():
-            print("\nRunning Whisper test script to download/verify the 'small' model...")
-            try:
-                result = subprocess.run(
-                    [str(python_path), str(whisper_test_script)],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    cwd=Path(_file_).parent
-                )
-                print("Whisper test script ran successfully.")
-            except subprocess.CalledProcessError as e:
-                print("\n--- Whisper Test Script Failed ---")
-                print(f"Error running whisper_test.py: {e}")
-            except FileNotFoundError:
-                print(f"\nError: Could not find whisper_test.py at {whisper_test_script}")
-        else:
-            print(f"\nWarning: whisper_test.py not found at {whisper_test_script}. Skipping model download check.")
-
+        
+        print("Dependencies installed successfully!")
         print("\nNote: If using the Whisper method, ensure ffmpeg is installed on your system.")
-        print("You can install ffmpeg using: https://ffmpeg.org/download.html")
+        print("(e.g., 'sudo apt install ffmpeg' or 'brew install ffmpeg' or 'choco install ffmpeg')")
         return True
-
     except subprocess.CalledProcessError as e:
         print(f"Error installing dependencies: {e}")
         return False
 
 def setup():
     """Set up the Articulate 3D addon"""
-    addon_dir = Path(_file_).parent
-    env_dir = addon_dir / "env" if sys.platform == "win32" else addon_dir / "env_linux"
-
+    # Get the addon directory
+    addon_dir = Path(__file__).parent
+    
+    # Create appropriate environment based on platform
+    if sys.platform == "win32":
+        env_dir = addon_dir / "env"
+    else:
+        env_dir = addon_dir / "env_linux"
+    
+    # Create virtual environment if it doesn't exist
     if not env_dir.exists():
         if not create_virtual_environment(env_dir):
             print("Failed to create virtual environment.")
             return False
-
+    
+    # Install dependencies
     if not install_dependencies(env_dir):
         print("Failed to install dependencies.")
         return False
-
+    
     print("\nSetup completed successfully!")
     print("\nTo use the Articulate 3D addon:")
     print("1. Open Blender")
@@ -148,8 +111,9 @@ def setup():
     print("3. Click 'Install' and select the addon directory")
     print("4. Enable the 'Articulate 3D' addon")
     print("5. Access the addon from the 3D View sidebar under 'Voice' tab")
+    
     return True
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     print("=== Articulate 3D Setup ===\n")
     setup()
