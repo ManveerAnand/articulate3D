@@ -5,182 +5,154 @@ Articulate 3D is a Blender addon that allows users to create and manipulate 3D m
 ## Key Features
 
 - Voice-controlled 3D modeling in Blender
-- Real-time voice recognition and processing
+- Real-time voice recognition and processing (using Vosk for wake word and SpeechRecognition/Whisper/Google Cloud STT/Gemini for commands)
 - AI-powered natural language understanding via Google Gemini
-- Secure API key management
-- Works within Blender's Python environment
+- Secure API key management using `.env` file
+- Runs necessary Python packages in a dedicated virtual environment to avoid conflicts with Blender's built-in Python.
 
 ## Architecture Overview
 
-The addon is designed with the following components:
+The addon consists of:
 
-1. **UI Component**: Blender panel interface for controlling voice input
-2. **Voice Processing**: Captures and transcribes audio input
-3. **Natural Language Understanding**: Processes commands using Gemini AI
-4. **Script Generation**: Converts natural language to Blender Python code
-5. **Execution Engine**: Safely runs generated scripts in Blender
+1.  **Blender Addon (`__init__.py`)**: Provides the UI panel in Blender, manages state, queues generated scripts, and communicates with the voice client.
+2.  **Voice Client (`blender_voice_client.py`)**: Runs within Blender's Python environment. It starts the standalone server, connects to it via sockets, sends context/configuration, and receives messages/scripts from the server, passing them to the main addon code.
+3.  **Standalone Voice Server (`src/standalone_voice_server.py`)**: Runs as a separate Python process in its own virtual environment (`env` or `env_linux`). This handles the heavy lifting:
+    *   Loading necessary libraries (Vosk, Whisper, Gemini SDK, etc.).
+    *   Listening for the wake word using Vosk.
+    *   Capturing command audio using SpeechRecognition.
+    *   Transcribing audio (Whisper/Google Cloud STT) or processing audio directly (Gemini).
+    *   Interacting with the Google Gemini API to generate Python scripts based on commands and Blender context.
+    *   Sending generated scripts or status messages back to the Voice Client via sockets.
 
 ## Installation
 
 ### Prerequisites
 
-- Blender 4.0+
-- Internet connection (for API access)
-- Microphone
-- Google Gemini API key
+*   **Blender 4.0+**: Download and install from [blender.org](https://www.blender.org/download/).
+*   **Python 3.8+**: Ensure Python is installed and accessible from your system's command line (check by opening a terminal/command prompt and typing `python --version`). It's recommended to add Python to your system's PATH during installation.
+*   **Git**: Needed to clone the repository. Download from [git-scm.com](https://git-scm.com/downloads).
+*   **Microphone**: Required for voice input.
+*   **Internet Connection**: Required for downloading dependencies and accessing the Google Gemini API.
+*   **Google Gemini API Key**: Obtain from [Google AI Studio](https://aistudio.google.com/app/apikey).
 
 ### Installation Steps
 
-1. **Clone the repository**:
-   ```
-   git clone https://github.com/yourusername/articulate3D.git
-   ```
+**Important:** These steps ensure the addon has its necessary Python packages installed correctly *before* you install it into Blender.
 
-2. **Run the setup script**:
-   ```
-   cd articulate3D
-   python setup.py
-   ```
-   This creates a virtual environment and installs dependencies.
+1.  **Clone the Repository**:
+    Open your terminal or command prompt, navigate to where you want to store the addon source code, and run:
+    ```bash
+    git clone https://github.com/ManveerAnand/articulate3D.git
+    cd articulate3D
+    ```
 
-3. **Configure API keys**:
-   - Copy `.env.example` to `.env`
-   - Add your Google Gemini API key
+2.  **Run the Setup Script**:
+    This step creates a dedicated Python virtual environment (`env` or `env_linux`) *inside* the `articulate3D` folder and installs dependencies there. **Make sure you are still in the `articulate3D` directory in your terminal** and run:
+    ```bash
+    python setup.py
+    ```
+    *   Wait for the script to complete. It might take a few minutes. Look for the "Dependencies installed successfully!" message.
+    *   Address any errors during this step (see Troubleshooting below, especially for PyAudio).
 
-4. **Install in Blender**:
-   - Open Blender
-   - Go to Edit > Preferences > Add-ons
-   - Click 'Install' and select the addon directory
-   - Enable the 'Articulate 3D' addon
+3.  **Configure API Key**:
+    *   After `setup.py` finishes successfully, find the `.env.example` file in the `articulate3D` directory.
+    *   Make a copy of this file and rename the copy to `.env`.
+    *   Open the `.env` file with a text editor.
+    *   Replace `"your_gemini_api_key_here"` with your actual Google Gemini API key. Save the file.
+    ```
+    # Example .env content:
+    GEMINI_API_KEY=AIzaSyB...your...actual...key...here...
+    ```
 
-## Handling Blender's Environment Limitations
+4.  **Create the Addon ZIP File**:
+    *   Navigate **one level up** from the `articulate3D` directory in your file explorer or terminal (so you are looking *at* the `articulate3D` folder).
+    *   Create a ZIP archive of the **entire `articulate3D` folder**. Make sure the ZIP file includes the `__init__.py`, `setup.py`, `.env`, `src`, `models`, and the newly created `env` (or `env_linux`) folders directly inside it.
+    *   Name the ZIP file something like `articulate3D_addon.zip`.
 
-Blender uses its own Python environment, which presents challenges for addons requiring external packages. Articulate 3D addresses this in several ways:
+5.  **Install ZIP in Blender**:
+    *   Open Blender (version 4.0 or newer).
+    *   Go to `Edit` > `Preferences`.
+    *   Click the `Add-ons` tab on the left.
+    *   Click the `Install...` button at the top right.
+    *   Navigate to where you saved `articulate3D_addon.zip` and select it.
+    *   Click `Install Add-on`.
+    *   Find "Articulate 3D" in the addons list (you can search for it) and check the box next to its name to enable it.
 
-1. **Bundled Virtual Environment**: The addon creates its own Python virtual environment during setup, separate from Blender's.
+6.  **Configure API Key in Blender**:
+    *   Close the Preferences window.
+    *   In the 3D Viewport, press `N` to open the sidebar (if it's not already open).
+    *   Find the `Voice` tab.
+    *   Paste your Google Gemini API key into the "API Key" field within the addon panel. (This ensures the addon UI can validate the key).
+    *   Select your desired Gemini Model and Audio Method.
 
-2. **Subprocess Communication**: The addon uses subprocess calls to execute code in the bundled environment while maintaining communication with Blender.
+## Usage
 
-3. **Dependency Management**: Required packages (SpeechRecognition, PyAudio, etc.) are installed in the bundled environment, not Blender's Python environment.
+1.  Open the Articulate 3D panel in the 3D View sidebar (`N` key > `Voice` tab).
+2.  Ensure your API key is entered.
+3.  Click "Start Voice Command". The status should change to "Listening...".
+4.  Say the wake word (e.g., "Okay Blender"). The status should change to indicate it's listening for a command.
+5.  Speak your command clearly (e.g., "Create a red cube", "Add a sphere and move it up").
+6.  The addon will process the command, generate a script, and execute it. Check the "Console Output" section in the panel for status messages and errors.
+7.  Click "Stop Voice Command" when finished.
 
-4. **Fallback Mechanisms**: If local processing fails, the addon can use online alternatives for speech recognition.
+## Troubleshooting
 
-## Real-time Processing
+*   **`setup.py` Fails / Dependency Errors**:
+    *   Ensure you have Python 3.8+ installed and added to your system PATH.
+    *   Try running the terminal/command prompt as an administrator (Windows) or using `sudo` (Linux/macOS) for the `python setup.py` command, although this shouldn't usually be necessary.
+    *   **PyAudio Installation Issues**: This is common.
+        *   **Windows**: You might need "Microsoft C++ Build Tools". Download the "Build Tools for Visual Studio" from the [Visual Studio website](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022), and during installation, select the "C++ build tools" workload. After installation, try running `python setup.py` again. Alternatively, try installing a pre-compiled PyAudio wheel from a trusted source like Christoph Gohlke's [Unofficial Windows Binaries](https://www.lfd.uci.edu/~gohlke/pythonlibs/#pyaudio) page (download the `.whl` file matching your Python version and system architecture, then install it using `pip install path/to/downloaded_pyaudio_file.whl` *within the addon's virtual environment* - e.g., `.\env\Scripts\python.exe -m pip install path/to/pyaudio.whl`).
+        *   **macOS**: Run `brew install portaudio` before running `python setup.py`.
+        *   **Linux (Debian/Ubuntu)**: Run `sudo apt-get update && sudo apt-get install portaudio19-dev python3-dev` before running `python setup.py`.
+    
+    *   **Whisper/ffmpeg Issues**: If using the Whisper transcription method, ensure `ffmpeg` is installed and available in your system's PATH.
+    
+        *   **Windows**: Download from the [official ffmpeg website](https://ffmpeg.org/download.html) or install using a package manager like Chocolatey (`choco install ffmpeg`).
+        *   **macOS**: `brew install ffmpeg`
+        *   **Linux**: `sudo apt update && sudo apt install ffmpeg`
 
-The addon uses threading to ensure real-time voice processing without blocking Blender's UI:
+*   **Microphone Not Working / No Voice Input**:
+    *   Check the `tests/microphone_test.py` script (run it using the virtual environment's Python: e.g., `.\env\Scripts\python.exe tests/microphone_test.py`).
+    *   Ensure the correct microphone is selected as the default input in your Operating System sound settings.
+    *   Check OS permissions allow applications (like Python/Blender) to access the microphone.
+    *   Try increasing microphone volume/gain in system settings.
 
-1. Voice input is captured in a background thread
-2. Processing happens asynchronously
-3. Results are returned to Blender when ready
+*   **API Key Errors**:
+    *   Double-check the key in the `.env` file and in the Blender addon panel. Ensure no extra spaces or characters.
+    *   Verify your internet connection.
+    *   Check your Google AI Studio account to ensure the key is active and has API access enabled.
 
-## LiveKit Integration (Planned)
+*   **Addon Not Starting / Not Appearing**:
+    *   Check Blender's System Console for errors during startup (Window > Toggle System Console).
+    *   Ensure you installed the correct `articulate3D_addon.zip` file created in Step 4.
+    *   Verify `setup.py` completed without errors *before* creating the ZIP.
 
-Future versions will support LiveKit for enhanced real-time audio processing:
-
-- Lower latency voice recognition
-- Better handling of network interruptions
-- Potential for collaborative voice commands
-
-## Testing the Addon
-
-### Basic Testing
-
-1. **Install the addon** following the installation steps above
-
-2. **Open the Voice panel** in Blender's 3D View sidebar
-
-3. **Enter your API key** in the configuration section
-
-4. **Click "Start Voice Command"** and speak a simple command like:
-   - "Create a red cube"
-   - "Add a sphere"
-   - "Move the selected object up 2 units"
-
-5. **Verify execution** by checking if the command was properly executed in the 3D view
-
-### Troubleshooting
-
-If you encounter issues:
-
-1. **Microphone not working**:
-   - Run `microphone_test.py` to check your microphone setup
-   - Ensure microphone permissions are enabled in your OS
-   - Try selecting a different microphone in your system settings
-
-2. **API Key Issues**:
-   - Verify your Gemini API key is valid
-   - Check the `.env` file exists and contains the correct key
-   - Ensure no spaces or quotes around the API key
-
-3. **Addon Not Starting**:
-   - Check Blender's System Console for error messages
-   - Verify all dependencies are installed (`setup.py` ran successfully)
-   - Ensure Python environment is properly set up
-
-4. **Voice Commands Not Recognized**:
-   - Speak clearly and at a normal pace
-   - Check your internet connection (required for API calls)
-   - Verify the voice recognition status in the addon panel
+*   **Voice Commands Not Recognized / Incorrect Scripts**:
+    *   Speak clearly. Background noise can interfere.
+    *   Check the "Console Output" in the addon panel and the `articulate3d_addon.log` / `articulate3d_server.log` files for specific errors from the transcription or AI generation steps.
+    *   Ensure the server process is running (you might see a second Python process running when the addon is active).
+    *   Try simpler commands first.
 
 ## Contributing
 
 Contributions are welcome! Please follow these steps:
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Run tests
-5. Submit a pull request
+1.  Fork the repository
+2.  Create a feature branch (`git checkout -b feature/AmazingFeature`)
+3.  Make your changes
+4.  Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+5.  Push to the branch (`git push origin feature/AmazingFeature`)
+6.  Open a Pull Request
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+Distributed under the MIT License. See `LICENSE` file for more information.
 
 ## Acknowledgments
 
-- Google Gemini API for natural language processing
-- Blender Foundation for the amazing 3D creation suite
-- Contributors and testers who helped improve this addon
-
-### Advanced Testing
-
-1. **Test environment handling**:
-   - Delete the `env` directory and run setup.py again to verify environment recreation
-   - Test on different operating systems to ensure cross-platform compatibility
-
-2. **Test error handling**:
-   - Try commands with ambiguous instructions
-   - Test with poor audio quality or background noise
-   - Disconnect from the internet to test offline behavior
-
-3. **Performance testing**:
-   - Test with complex scenes to ensure Blender remains responsive
-   - Try rapid successive commands to test queue handling
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Microphone not detected**:
-   - Ensure your microphone is properly connected
-   - Check system permissions for microphone access
-
-2. **API key errors**:
-   - Verify your API key is correctly entered
-   - Check internet connectivity
-
-3. **Dependencies not installing**:
-   - Run setup.py with administrator privileges
-   - Check Python version compatibility (Python 3.8+ recommended)
-
-4. **Addon not appearing in Blender**:
-   - Ensure you're installing the correct directory
-   - Check Blender's console for error messages
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
+*   Google Gemini API
+*   Blender Foundation
+*   OpenAI Whisper
+*   Vosk
+*   SpeechRecognition library
+*   All Contributors

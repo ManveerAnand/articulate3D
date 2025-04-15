@@ -23,30 +23,47 @@ def install_dependencies(env_dir):
     if not python_path.exists():
         print(f"Error: Python executable not found at {python_path}")
         return False
-    
+
     print("Installing required dependencies...")
     try:
-        # Base dependencies - ensure python-dotenv is installed first to avoid import errors
-        dependencies = [
-            "python-dotenv",
-            "SpeechRecognition", 
-            "PyAudio", 
-            "google-generativeai", 
-            "pytest"
-        ]
-        
-        # Check if LiveKit should be installed
-        use_livekit = input("Do you want to enable LiveKit for enhanced real-time audio processing? (y/n): ").lower() == 'y'
-        if use_livekit:
-            dependencies.append("livekit-server-sdk")
-            print("LiveKit support will be enabled.")
-        
-        # Install required packages
+        # Install PyTorch CPU-only first
+        print("Installing PyTorch (CPU version)...")
         subprocess.check_call([
-            str(pip_path), "install", 
-            *dependencies
+            str(python_path), "-m", "pip", "install",
+            "torch", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cpu"
         ])
-        
+
+        # Read requirements from requirements.txt
+        print("Reading dependencies from requirements.txt...")
+        requirements_path = Path(__file__).parent / "requirements.txt"
+        dependencies = []
+        if requirements_path.exists():
+            try:
+                with open(requirements_path, 'r', encoding='utf-8-sig') as f: # Use utf-8-sig to handle potential BOM
+                    # Filter out comments, empty lines, and PyTorch/Torchaudio (installed separately)
+                    dependencies = [
+                        line.strip() for line in f
+                        if line.strip() and not line.startswith('#') and 'torch' not in line.lower()
+                    ]
+                print(f"Found {len(dependencies)} dependencies in requirements.txt (excluding torch).")
+            except Exception as e:
+                print(f"Error reading requirements.txt: {e}")
+                # Decide if we should stop or continue with an empty list
+                # For now, let's print the error and continue with potentially empty list
+        else:
+            print(f"Warning: {requirements_path} not found. Cannot install dependencies from file.")
+            # Fallback to empty list or define essential defaults? Let's use empty for now.
+
+        # Install required packages using 'python -m pip' for better reliability
+        if dependencies: # Only run if we found dependencies
+            print("Installing dependencies from requirements.txt...")
+            subprocess.check_call([
+                str(python_path), "-m", "pip", "install",
+                *dependencies
+            ])
+        else:
+            print("No dependencies found in requirements.txt to install (excluding torch).")
+
         # Create .env file if it doesn't exist
         env_file = Path(__file__).parent / ".env"
         env_example = Path(__file__).parent / ".env.example"
@@ -58,6 +75,8 @@ def install_dependencies(env_dir):
             print(".env file created. Please edit it to add your API keys.")
         
         print("Dependencies installed successfully!")
+        print("\nNote: If using the Whisper method, ensure ffmpeg is installed on your system.")
+        print("(e.g., 'sudo apt install ffmpeg' or 'brew install ffmpeg' or 'choco install ffmpeg')")
         return True
     except subprocess.CalledProcessError as e:
         print(f"Error installing dependencies: {e}")

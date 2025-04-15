@@ -86,6 +86,7 @@ script_queue = []
 command_history = collections.deque(maxlen=20) # Main history (temporary)
 starred_commands = [] # Persistent starred commands list
 last_transcription = None
+pending_transcriptions = {} # request_id: transcription mapping
 
 # --- Helper Functions ---
 def find_history_entry_by_timestamp(timestamp):
@@ -111,11 +112,21 @@ class VoiceCommandProperties(bpy.types.PropertyGroup):
     )
     selected_model: bpy.props.EnumProperty(
         items=[
-            ("gemini-2.0-flash", "Gemini 2.0 Flash", "Fast model"),
-            ("gemini-2.0-pro", "Gemini 2.0 Pro", "Advanced model"),
-            ("gemini-2.0-thinking", "Gemini 2.0 Thinking", "Complex reasoning"),
-            ("gemini-1.5-flash", "Gemini 1.5 Flash", "Stable flash")
+            # Updated model list - check exact names from Google AI Studio/docs if needed
+            ("gemini-2.0-flash", "Gemini 2.0 Flash", "Fast model for general tasks"),
+            ("gemini-2.5-pro-exp-03-25", "Gemini 2.5 Pro Exp", "Latest advanced model (Experimental)"),
+            # Add other relevant models if desired, e.g., older stable ones
+            # ("gemini-1.5-pro-latest", "Gemini 1.5 Pro", "Previous generation Pro model"),
+            # ("gemini-1.5-flash-latest", "Gemini 1.5 Flash", "Previous generation Flash model"),
         ], name="Gemini Model", default="gemini-2.0-flash"
+    )
+    audio_method: bpy.props.EnumProperty(
+        items=[
+            ("gemini", "Gemini Direct", "Process audio directly with Gemini (Fastest)"),
+            ("whisper", "Whisper", "Transcribe with Whisper (Base model)"),
+            ("google_stt", "Google Cloud STT", "Transcribe with Google STT (Requires Cloud setup)"),
+        ], name="Audio Method", default="whisper",
+        description="Method used to process voice commands"
     )
     console_output: bpy.props.StringProperty(name="Console Output", default="Ready...", maxlen=1024)
     show_history: bpy.props.BoolProperty(name="Show Command History", default=True)
@@ -135,48 +146,116 @@ def handle_script(context, script):
         logger.error(f"Error handling script: {str(e)}", exc_info=True)
         update_console(context, f"Error handling script: {str(e)}")
 
+import json # Add json import for safe string conversion
+
 def process_voice_client_message(context, message):
-    global last_transcription, command_history
+    global last_transcription, command_history, pending_transcriptions # Added pending_transcriptions
     try:
-        logger.debug(f"Processing message: {message}")
+        # Ensure message is logged safely as a string
+        log_message_str = json.dumps(message) if isinstance(message, dict) else str(message)
+        logger.debug(f"Processing message: {log_message_str[:500]}") # Log truncated message safely
+
         if isinstance(message, str):
             update_console(context, message)
         elif isinstance(message, dict):
             status = message.get("status", "unknown")
             msg_text = message.get("message", "No message content.")
+            request_id = message.get("request_id") # Get request ID if present
 
-            if status == "transcribed":
+            if status == "request_context":
+                # Server is asking for context for a voice command
+                logger.info(f"Received context request {request_id}: {msg_text}")
+                update_console(context, f"Server: {msg_text}") # Show transcription/status
+
+                # Store the transcription text associated with this request ID
+                if request_id and msg_text:
+                    # Clean up the message text to get the core transcription
+                    cleaned_transcription = msg_text.replace("Processing audio command with Gemini...", "").replace("Transcribed command (Whisper):", "").replace("Transcribed command (Google STT):", "").strip()
+                    if cleaned_transcription:
+                         pending_transcriptions[request_id] = cleaned_transcription
+                         logger.debug(f"Stored transcription for {request_id}: '{cleaned_transcription}'")
+                    else:
+                         logger.warning(f"Could not extract clean transcription from context request message for {request_id}: {msg_text}")
+                         pending_transcriptions[request_id] = f"Voice Command ({request_id})" # Fallback
+
+                # Immediately gather and send context back
+                try:
+                    import sys, os
+                    addon_dir = os.path.dirname(os.path.abspath(__file__))
+                    if addon_dir not in sys.path: sys.path.insert(0, addon_dir)
+                    import blender_voice_client
+                    context_dict = blender_voice_client.get_blender_context()
+                    blender_voice_client.send_context_response(request_id, context_dict)
+                    logger.debug(f"Sent context response for {request_id}")
+                except Exception as e:
+                    logger.error(f"Failed to send context response for {request_id}: {e}", exc_info=True)
+                    update_console(context, f"Error sending context: {e}")
+
+            elif status == "transcribed":
                 last_transcription = msg_text.replace("Transcribed: ", "").strip()
                 update_console(context, f"Server: {msg_text}")
             elif status == "script":
                 script_content = message.get("script", "")
-                original_text = message.get("original_text") # Text from edited command
-                command_text = original_text if original_text else last_transcription
+                original_text = message.get("original_text") # Text from edited command (e.g., direct text input)
+                command_text = "Unknown Command" # Default
 
-                if command_text:
-                    script_queue.append((script_content, command_text))
-                    update_console(context, f"Received script for '{command_text}' - queued.")
-                    if not original_text: # Clear only if it was from voice
-                        last_transcription = None
+                # Determine the source description for the history
+                if original_text:
+                    command_text = original_text # Prefer text command origin if available
+                elif request_id in pending_transcriptions:
+                    command_text = pending_transcriptions.pop(request_id) # Retrieve and remove stored transcription
+                    logger.debug(f"Retrieved transcription for {request_id}: '{command_text}'")
+                elif request_id:
+                    command_text = f"Voice Command ({request_id})" # Fallback if ID exists but no transcription was stored
+                    logger.warning(f"No pending transcription found for script request {request_id}. Using fallback.")
                 else:
-                    logger.warning("Received script message without associated command text.")
-                    script_queue.append((script_content, None)) # Queue anyway
-                    update_console(context, "Received script (unknown origin) - queued.")
+                     logger.error("Received script message with neither original_text nor request_id.")
+                     command_text = "Unknown Script Source" # Absolute fallback
+
+                # Process the script (or lack thereof)
+                if script_content:
+                    # Queue script, transcription, AND request_id
+                    script_queue.append((script_content, command_text, request_id))
+                    update_console(context, f"Received script for '{command_text}' - queued.")
+                else:
+                    # Script generation failed on the server side
+                    logger.warning(f"Received script message status but no script content for '{command_text}' (Request ID: {request_id}).")
+                    update_console(context, f"Script generation failed for '{command_text}'.")
+                    # Log failed attempt to history
+                    entry = {
+                        'transcription': command_text, # Use the determined command_text
+                        'status': 'Failed Generation',
+                        'script': None, 'timestamp': time.time(), 'starred': False
+                    }
+                    command_history.append(entry)
+                    # Clean up pending transcription if it somehow still exists for this ID
+                    if request_id in pending_transcriptions:
+                        del pending_transcriptions[request_id]
+
 
             elif status == "error":
-                logger.error(f"Received error from server: {msg_text}")
-                update_console(context, f"Server Error: {msg_text}")
-                if last_transcription: # Log error against last voice command attempt
-                     entry = {
-                        'transcription': last_transcription, 'status': 'Failed Generation/STT',
-                        'script': None, 'timestamp': time.time(), 'starred': False
-                     }
-                     command_history.append(entry)
-                     last_transcription = None
-                else:
-                    logger.warning("Received error message but last_transcription was None.")
+                error_msg = f"Server Error: {msg_text}"
+                # Attempt to link error back to a pending transcription if possible
+                linked_transcription = "Unknown Command"
+                if request_id and request_id in pending_transcriptions:
+                    linked_transcription = pending_transcriptions.pop(request_id) # Retrieve and remove
+                    logger.debug(f"Retrieved transcription for error message {request_id}: '{linked_transcription}'")
+                elif request_id:
+                    linked_transcription = f"Voice Command ({request_id})" # Fallback
+                logger.error(error_msg)
+                update_console(context, error_msg)
+                # Log error to history, using the linked transcription if found
+                entry = {
+                    'transcription': linked_transcription,
+                    'status': 'Server Error',
+                    'script': None, 'timestamp': time.time(), 'starred': False
+                }
+                command_history.append(entry)
+                logger.debug(f"Appended server error to command_history: {entry}")
+
+
             elif status in ["info", "ready", "stopped"]:
-                 logger.debug(f"Received status '{status}' message.")
+                 logger.info(f"Received status '{status}': {msg_text}")
                  update_console(context, f"Server: {msg_text}")
             else:
                 logger.warning(f"Received message with unhandled status: {status}")
@@ -185,45 +264,82 @@ def process_voice_client_message(context, message):
             logger.warning(f"Received unexpected message format: {type(message)} - {message}")
             update_console(context, str(message))
     except Exception as e:
-        ui_error_msg = f"Error processing message from server: {str(e)}"
-        logger.error(ui_error_msg, exc_info=True)
-        update_console(context, ui_error_msg)
+            # Log the raw error details for better debugging
+            ui_error_msg = f"Error processing message: {str(e)}"
+            logger.error(f"Error processing message: {str(e)}. Raw message: {log_message_str[:500]}", exc_info=True)
+            update_console(context, ui_error_msg)
 
 def execute_scripts_timer():
     global command_history
     context = bpy.context
     needs_redraw = False
     if script_queue:
-        script_to_execute, transcription = script_queue.pop(0)
-        logger.debug(f"Dequeued script for transcription: {transcription}")
-        status = 'Unknown'
-        entry_timestamp = time.time() # Use consistent timestamp
+        popped_item = None # Initialize to None
         try:
-            logger.info(f"Attempting to execute script:\n---\n{script_to_execute}\n---")
+            # --- Wrap the pop operation in a try/except ---
+            popped_item = script_queue.pop(0)
+        except IndexError:
+            # This handles the case where the queue becomes empty between the 'if script_queue:' check and the pop attempt.
+            logger.debug("execute_scripts_timer: Queue was empty when pop was attempted (potential race condition).")
+            return 1.0 # Return timer interval even if nothing was processed this cycle
+
+        # If pop was successful, proceed
+        if popped_item:
+            script_to_execute, transcription, original_request_id = popped_item # Unpack here
+            logger.debug(f"Dequeued script for transcription: '{transcription}' -- Request ID immediately after pop: {original_request_id}") # Log the unpacked ID
+            status = 'Unknown'
+            entry_timestamp = time.time()
+        try:
+            # Log context before execution
             logger.info(f"Context before exec: area={context.area.type if context.area else 'None'}, window={context.window.screen.name if context.window else 'None'}, mode={context.mode if hasattr(context, 'mode') else 'N/A'}")
-            update_console(context, f"Executing script for: {transcription or 'Unknown command'}")
+            update_console(context, f"Executing script for: {transcription}")
+
+            # Execute the script directly
             exec(script_to_execute, {"bpy": bpy})
+
             status = 'Success'
-            update_console(context, "Script executed successfully.")
+            update_console(context, f"Script for '{transcription}' executed successfully.")
         except Exception as e:
             status = 'Script Error'
-            ui_error_msg = f"Script Execution Error: {str(e)}"
-            logger.error(ui_error_msg, exc_info=True)
+            error_type = type(e).__name__
+            error_message = str(e)
+            # Removed exception attribute logic, use original_request_id directly
+            ui_error_msg = f"Script Execution Error for '{transcription}': {error_type} - {error_message}"
+            # Log detailed traceback using the ID from the original tuple (original_request_id)
+            logger.error(f"Script Execution Error for '{transcription}' (Request ID: {original_request_id}):", exc_info=True)
             update_console(context, ui_error_msg)
-        
-        if transcription:
-             entry = {
-                 'transcription': transcription, 'status': status,
-                 'script': script_to_execute, 'timestamp': entry_timestamp,
-                 'starred': False # New entries are never starred by default
-             }
-             command_history.append(entry)
-             logger.debug(f"Appended to command_history: {entry}")
-             needs_redraw = True
-        else:
-              logger.warning("Script executed, but no transcription was associated.")
-              
-    if needs_redraw:
+
+            # --- Send error back to server ---
+            try:
+                import sys, os
+                addon_dir = os.path.dirname(os.path.abspath(__file__))
+                if addon_dir not in sys.path: sys.path.insert(0, addon_dir)
+                import blender_voice_client
+                if hasattr(blender_voice_client, 'send_execution_error'):
+                    # Use the original_request_id variable directly
+                    logger.debug(f"Value of original_request_id JUST BEFORE sending error: {original_request_id}")
+                    logger.info(f"Sending execution error details back to server for request {original_request_id}...")
+                    blender_voice_client.send_execution_error(original_request_id, error_type, error_message)
+                else:
+                    # This case should ideally not happen if client is updated
+                    logger.warning("blender_voice_client.send_execution_error function not found.")
+            except Exception as send_err:
+                logger.error(f"Failed to send execution error to server: {send_err}", exc_info=True)
+            # --- End error sending ---
+
+            # Always add to history
+            entry = {
+                'transcription': transcription, 'status': status,
+                'script': script_to_execute, 'timestamp': entry_timestamp,
+                'starred': False # New entries are never starred by default
+            }
+            command_history.append(entry)
+            logger.debug(f"Appended to command_history: {entry}")
+            needs_redraw = True
+            # Removed redundant check for transcription before adding to history
+
+    # Removed the extra check here as the try/except around pop handles it
+    if needs_redraw: # Only redraw if we actually processed something
         logger.debug("Tagging UI for redraw.")
         for window in context.window_manager.windows:
             for area in window.screen.areas:
@@ -231,14 +347,15 @@ def execute_scripts_timer():
                     for region in area.regions:
                         if region.type == 'UI':
                             region.tag_redraw()
-    return 0.5
+    return 1.0 # Increased timer interval to 1 second
 
 # --- Operators ---
 class BLENDER_OT_voice_command(bpy.types.Operator):
     bl_idname = "wm.voice_command"
     bl_label = "Start Voice Command"
-    # ... (validate_api_key remains the same) ...
+
     def validate_api_key(self, api_key):
+        """Checks if the provided Gemini API key is valid by making a simple request."""
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
             response = requests.get(url)
@@ -282,8 +399,28 @@ class BLENDER_OT_voice_command(bpy.types.Operator):
                 update_console(context, ui_error_msg)
                 props.is_listening = False
                 return {'CANCELLED'}
+
+            # Send configuration immediately after successful connection
+            logger.info("Sending configuration to server...")
+            config_success = blender_voice_client.send_configuration(
+                props.selected_model,
+                props.audio_method,
+                callback=lambda msg: process_voice_client_message(context, msg) # Use existing handler for feedback
+            )
+            if not config_success:
+                 ui_error_msg = "Failed to send configuration to server."
+                 self.report({'ERROR'}, ui_error_msg)
+                 update_console(context, ui_error_msg)
+                 # Stop the client if config fails? Or let it run? For now, stop.
+                 blender_voice_client.stop_client(lambda msg: update_console(context, msg))
+                 props.is_listening = False
+                 return {'CANCELLED'}
+
+            # Register timer only after successful connection and config send
             if not bpy.app.timers.is_registered(execute_scripts_timer):
                 bpy.app.timers.register(execute_scripts_timer)
+
+            update_console(context, "Client connected and configured. Listening...")
             return {'FINISHED'}
         except Exception as e:
             props.is_listening = False
@@ -366,12 +503,18 @@ class BLENDER_OT_execute_history_command(bpy.types.Operator):
             script_to_execute = entry_to_execute.get('script')
             original_transcription = entry_to_execute.get('transcription', 'Unknown Command')
 
-            if not script_to_execute:
-                self.report({'WARNING'}, "No script associated with this item.")
-                return {'CANCELLED'}
+            # --- Added Check: Ensure script exists before trying to execute ---
+            if not script_to_execute or not script_to_execute.strip():
+                error_msg = f"No valid script found in history item: '{original_transcription}'"
+                logger.warning(error_msg)
+                self.report({'WARNING'}, error_msg)
+                update_console(context, error_msg)
+                return {'CANCELLED'} # Do not proceed
 
             update_console(context, f"Executing {'starred' if self.is_starred_execution else 'history'} command: {original_transcription}")
             logger.info(f"Executing {'starred' if self.is_starred_execution else 'history'} script (index {self.history_index}): {original_transcription}")
+            # Add debug log to confirm script content before execution
+            logger.debug(f"Script content for execution:\n---\n{script_to_execute}\n---")
 
             status = 'Unknown'
             try:
@@ -380,16 +523,18 @@ class BLENDER_OT_execute_history_command(bpy.types.Operator):
                 update_console(context, "Script executed successfully.")
             except Exception as e:
                 status = 'Script Error (Executed)'
-                ui_error_msg = f"Script Execution Error: {str(e)}"
-                logger.error(ui_error_msg, exc_info=True)
-                update_console(context, ui_error_msg)
-                self.report({'ERROR'}, ui_error_msg)
+                ui_error_msg = f"Script Execution Error: {type(e).__name__} - {str(e)}"
+                # Use exc_info=True for detailed traceback in the log file
+                logger.error(f"Error executing history script '{original_transcription}':", exc_info=True)
+                update_console(context, ui_error_msg) # Show simplified error in UI console
+                self.report({'ERROR'}, ui_error_msg) # Report error to Blender UI
 
             # Add a NEW entry to the main history, always unstarred
+            # Ensure the script is actually passed here
             new_entry = {
                 'transcription': f"{original_transcription} (Executed)",
                 'status': status,
-                'script': script_to_execute,
+                'script': script_to_execute, # Pass the script that was attempted
                 'timestamp': time.time(),
                 'starred': False # Executed commands are never starred by default
             }
@@ -527,7 +672,6 @@ class BLENDER_PT_voice_command_panel(bpy.types.Panel):
         layout = self.layout
         props = context.scene.voice_command_props
         
-        # ... (API Config, Status, Console, Command Buttons, Help - remain the same) ...
         # API Configuration
         api_box = layout.box()
         api_box.label(text="Configuration:", icon="SETTINGS")
@@ -545,9 +689,13 @@ class BLENDER_PT_voice_command_panel(bpy.types.Panel):
         # Console output
         console_box = layout.box()
         console_box.label(text="Console Output:", icon="CONSOLE")
-        console_box.prop(props, "console_output")
-        console_box.prop(props, "selected_model")
-        
+        console_box.prop(props, "console_output", text="") # Use empty text label
+
+        # Model and Method Selection
+        config_row = layout.row(align=True)
+        config_row.prop(props, "selected_model")
+        config_row.prop(props, "audio_method")
+
         # Command buttons
         buttons_row = layout.row(align=True)
         buttons_row.enabled = bool(props.api_key)
@@ -681,7 +829,7 @@ def register():
         for cls in classes:
             bpy.utils.register_class(cls)
         bpy.types.Scene.voice_command_props = bpy.props.PointerProperty(type=VoiceCommandProperties)
-        # ... (rest of register remains the same) ...
+        # Attempt to load API key from .env file on registration
         try:
             env_path = Path(__file__).parent / '.env'
             if env_path.exists():
