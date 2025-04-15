@@ -220,7 +220,7 @@ DEFAULT_GENERATION_CONFIG = {
     "temperature": 0.2,
     "top_p": 0.8,
     "top_k": 40,
-    "max_output_tokens": 8096,
+    "max_output_tokens": 16192,
 }
 DEFAULT_SAFETY_SETTINGS = [
     {'category': 'HARM_CATEGORY_HARASSMENT', 'threshold': 'BLOCK_MEDIUM_AND_ABOVE'},
@@ -316,16 +316,22 @@ def process_audio_with_chat(chat_session, audio_bytes: bytes, blender_context: d
 Listen to the following audio command and translate it into a `bpy` Python script compatible with Blender 4.x.
 
 **Instructions:**
-1.  **Output Python Code Only:** Your response must contain ONLY the Python script. Do not include ```python, explanations, comments, introductions, or any other text.
-2.  **Use Blender 4.x API:** Ensure the script uses `bpy` commands compatible with Blender 4.x.
-3.  **Prioritize `bpy.data`:** Whenever possible, use the `bpy.data` API for creating/manipulating objects, meshes, materials, etc. It is more robust than `bpy.ops` when run from scripts. Only use `bpy.ops` if `bpy.data` is not suitable for the specific task.
-4.  **Consider History:** Remember previous commands and responses in this chat session.
-5.  **Handle Errors:** If the command is unclear, too complex, or requires `bpy.ops` in an unsafe way, output ONLY the comment: `# Error: Command cannot be processed.`
+1. **Output Python Code Only:** Your response must contain ONLY the Python script. Do not include ```python, explanations, comments, introductions, or any other text.
+2. **Use Blender 4.x API:** The script must exclusively use `bpy` commands compatible with Blender 4.x. Avoid any deprecated or removed enums, properties, or functions.
+3. **Render Engine Enums:** Always use Blender 4.x valid values. For example:
+    - Use `'BLENDER_EEVEE_NEXT'` instead of `'BLENDER_EEVEE'`.
+    - Use `'CYCLES'`, `'HYDRA_STORM'`, or `'BLENDER_WORKBENCH'` where applicable.
+4. **Prioritize `bpy.data`:** Whenever possible, use the `bpy.data` API for creating and manipulating objects, meshes, and materials. Reserve `bpy.ops` only for actions that cannot be done through `bpy.data`.
+5. **Consider Context and History:** Remember prior commands and responses in this chat session to ensure coherent and context-aware scripting.
+make sure the script is valid and can be executed in blender.
+another importatant note: if asked for models like model of a plane , a three by three rubix cube, a flower vase , a car etc make sure to group the items like for a three by three rubix cube, group the items in a collection called rubix cube(here all the cubes) or all the parts of a flower vase in a collection called flower vase.
+6. **Handle Errors:** If the command is ambiguousd`# Error: Command cannot be processed with reason in one word.`
 
 **Current Blender Context:**
 {context_info}
 
 **Script:**
+
 """
 
     try:
