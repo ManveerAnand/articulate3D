@@ -11,6 +11,7 @@ import base64
 import io
 import wave
 import tempfile
+import struct # Added for message framing
 import numpy as np
 from pathlib import Path
 
@@ -823,6 +824,17 @@ def process_captured_command(conn: socket.socket, addr: str, audio_data: bytes, 
 #         logger.info(f"[{addr}] Audio listener thread (SpeechRecognition) finished.")
 
 
+# --- Helper Function for Receiving Framed Messages ---
+def recv_all(sock, n):
+    """Helper function to receive exactly n bytes from a socket."""
+    data = bytearray()
+    while len(data) < n:
+        packet = sock.recv(n - len(data))
+        if not packet:
+            return None # Connection closed
+        data.extend(packet)
+    return bytes(data)
+
 # --- Client Message Handling ---
 def client_message_handler_thread(conn: socket.socket, addr):
     """Handles messages received from a specific client connection."""
@@ -836,37 +848,61 @@ def client_message_handler_thread(conn: socket.socket, addr):
     while not stop_server.is_set():
         # logger.debug(f"[{addr}] Handler loop iteration start.") # Removed noisy log
         try:
-            # logger.debug(f"[{addr}] Setting socket timeout and attempting recv...") # Removed noisy log
-            conn.settimeout(0.5)
-            client_data = conn.recv(8192)
-            if not client_data:
-                logger.info(f"[{addr}] Client disconnected (recv returned empty).")
-                # --- Start Cleanup ---
-                logger.info(f"[{addr}] Performing cleanup for handler thread due to empty recv.")
+            # --- Receive Framed Message ---
+            # 1. Read the 4-byte header (message length)
+            header_data = recv_all(conn, 4)
+            if not header_data:
+                logger.info(f"[{addr}] Client disconnected (failed to read header).")
+                # --- Start Cleanup (Duplicated from below, consider refactoring) ---
+                logger.info(f"[{addr}] Performing cleanup for handler thread due to header read failure.")
                 if conn in client_configs:
                     try: del client_configs[conn]
                     except KeyError: pass
                     logger.debug(f"[{addr}] Removed client config during cleanup.")
-                # Also clear chat session for this client
                 if conn in client_chat_sessions:
                     try: del client_chat_sessions[conn]
                     except KeyError: pass
                     logger.debug(f"[{addr}] Removed client chat session during cleanup.")
-
                 requests_to_remove = [req_id for req_id, data in pending_context_requests.items() if data.get('conn') == conn]
                 for req_id in requests_to_remove:
                     try: del pending_context_requests[req_id]
                     except KeyError: pass
                 if requests_to_remove: logger.debug(f"[{addr}] Removed {len(requests_to_remove)} pending context requests during cleanup.")
-
                 close_socket(conn, addr)
                 # --- End Cleanup ---
                 break
-            logger.debug(f"[{addr}] Received {len(client_data)} bytes from client.")
 
+            # 2. Unpack the length
+            msg_len = struct.unpack('!I', header_data)[0]
+            logger.debug(f"[{addr}] Received header indicating message length: {msg_len}")
+
+            # 3. Read the full message payload
+            payload_data = recv_all(conn, msg_len)
+            if not payload_data:
+                logger.info(f"[{addr}] Client disconnected (failed to read payload of size {msg_len}).")
+                # --- Start Cleanup (Duplicated, consider refactoring) ---
+                logger.info(f"[{addr}] Performing cleanup for handler thread due to payload read failure.")
+                if conn in client_configs:
+                    try: del client_configs[conn]
+                    except KeyError: pass
+                    logger.debug(f"[{addr}] Removed client config during cleanup.")
+                if conn in client_chat_sessions:
+                    try: del client_chat_sessions[conn]
+                    except KeyError: pass
+                    logger.debug(f"[{addr}] Removed client chat session during cleanup.")
+                requests_to_remove = [req_id for req_id, data in pending_context_requests.items() if data.get('conn') == conn]
+                for req_id in requests_to_remove:
+                    try: del pending_context_requests[req_id]
+                    except KeyError: pass
+                if requests_to_remove: logger.debug(f"[{addr}] Removed {len(requests_to_remove)} pending context requests during cleanup.")
+                close_socket(conn, addr)
+                # --- End Cleanup ---
+                break
+
+            # 4. Decode the JSON payload
             try:
-                client_message = json.loads(client_data.decode('utf-8'))
-                logger.debug(f"[{addr}] Received message: {client_message}")
+                client_message = json.loads(payload_data.decode('utf-8'))
+                logger.debug(f"[{addr}] Successfully decoded message: {client_message}")
                 msg_type = client_message.get("type")
 
                 if msg_type == "configure":

@@ -5,6 +5,7 @@ import socket
 import threading
 import subprocess
 import time # Added for retry delay
+import struct # Added for message framing
 from pathlib import Path
 import bpy # Import bpy for context gathering
 
@@ -22,6 +23,8 @@ client_thread = None
 # --- Context Gathering ---
 def get_blender_context():
     """Gathers relevant context from Blender's current state."""
+    start_time = time.perf_counter() # Start timing
+    print("[CLIENT DEBUG] get_blender_context: Starting context gathering...") # Log start
     context_data = {
         "mode": "UNKNOWN",
         "scene_name": None,
@@ -71,6 +74,10 @@ def get_blender_context():
         print(f"Error getting Blender context: {e}") # Keep print for console
         # Optionally report to Blender's info area:
         # bpy.context.window_manager.popup_menu(lambda self, context: self.layout.label(text=f"Context Error: {e}"), title="Articulate3D Error", icon='ERROR')
+    finally:
+        end_time = time.perf_counter() # End timing
+        duration = end_time - start_time
+        print(f"[CLIENT DEBUG] get_blender_context: Finished gathering. Duration: {duration:.4f} seconds") # Log duration
 
     return context_data
 # --- End Context Gathering ---
@@ -330,6 +337,35 @@ def start_client(callback=None):
     
     return True
 
+# --- Helper Function for Framed Messaging ---
+def send_framed_message(sock, message_dict, callback=None):
+    """Encodes, frames, and sends a message dictionary."""
+    try:
+        message_json = json.dumps(message_dict)
+        message_bytes = message_json.encode('utf-8')
+        # Prepend message length as 4-byte unsigned integer (network byte order)
+        header = struct.pack('!I', len(message_bytes))
+        sock.sendall(header)
+        sock.sendall(message_bytes)
+        # Optional: Log successful send if needed, but keep it concise
+        # print(f"[CLIENT DEBUG] Sent framed message: Type={message_dict.get('type', 'N/A')}, Length={len(message_bytes)}")
+        return True
+    except socket.error as e:
+        error_msg = f"Socket error sending framed message: {e}"
+        print(error_msg)
+        if callback:
+            callback({"status": "error", "message": error_msg})
+        # Consider closing socket or signaling error more broadly if needed
+        return False
+    except Exception as e:
+        error_msg = f"Error encoding/sending framed message: {e}"
+        print(error_msg)
+        if callback:
+            callback({"status": "error", "message": error_msg})
+        return False
+# --- End Helper Function ---
+
+
 def stop_client(callback=None):
     """Stop the voice recognition client"""
     global client_thread, client_socket
@@ -368,23 +404,21 @@ def send_configuration(model, method, callback=None):
             "model": model,
             "method": method
         }
-        message = json.dumps(message_data)
-        client_socket.sendall(message.encode())
-        print(f"Sent configuration: Model={model}, Method={method}") # Replaced logger with print
-        if callback:
-            callback({"status": "info", "message": f"Configuration sent (Model: {model}, Method: {method})"})
-        return True
-    except socket.error as e:
-        error_msg = f"Socket error sending configuration: {e}"
-        print(error_msg) # Replaced logger with print
+        # Corrected structure
+        if send_framed_message(client_socket, message_data, callback):
+            print(f"Sent configuration: Model={model}, Method={method}")
+            if callback:
+                callback({"status": "info", "message": f"Configuration sent (Model: {model}, Method: {method})"})
+            return True
+        else:
+            # Error already printed/handled by send_framed_message
+            return False
+    except Exception as e:
+        # Catch any unexpected error during the process
+        error_msg = f"Unexpected error in send_configuration: {e}"
+        print(error_msg)
         if callback:
             callback({"status": "error", "message": error_msg})
-        return False
-    except Exception as e:
-        error_msg = f"Error sending configuration: {e}"
-        print(error_msg) # Replaced logger with print
-        if callback:
-             callback({"status": "error", "message": error_msg})
         return False
 
 def send_context_response(request_id, context_dict, callback=None):
@@ -400,15 +434,18 @@ def send_context_response(request_id, context_dict, callback=None):
             "request_id": request_id,
             "context": context_dict
         }
-        message = json.dumps(message_data)
-        client_socket.sendall(message.encode())
-        print(f"Sent context response for request_id: {request_id}") # Replaced logger with print
-        return True
-    except socket.error as e:
-        print(f"Socket error sending context response for {request_id}: {e}") # Replaced logger with print
-        return False
+        # Corrected structure
+        if send_framed_message(client_socket, message_data, callback):
+            print(f"Sent context response for request_id: {request_id}")
+            return True
+        else:
+            # Error already printed/handled by send_framed_message
+            return False
     except Exception as e:
-        print(f"Error sending context response for {request_id}: {e}") # Replaced logger with print
+        # Catch any unexpected error during the process
+        error_msg = f"Unexpected error in send_context_response: {e}"
+        print(error_msg)
+        # No callback needed here usually
         return False
 
 
@@ -430,24 +467,24 @@ def send_text_command(text, callback=None):
             "text": text,
             "context": current_context # Add context here
         }
-        message = json.dumps(message_data)
-        client_socket.sendall(message.encode())
-        if callback:
-            # Provide immediate feedback that the text was sent
-            callback({"status": "info", "message": f"Sent text command: {text}"})
-        return True
-    except socket.error as e:
-        if callback:
-            # Report the error but don't stop the client here.
-            # Let the receive thread handle persistent connection issues.
-            callback({"status": "error", "message": f"Socket error sending text command: {e}"})
-        return False # Indicate send failure
+        # Corrected structure
+        if send_framed_message(client_socket, message_data, callback):
+            if callback:
+                callback({"status": "info", "message": f"Sent text command: {text}"})
+            return True
+        else:
+            # Error already printed/handled by send_framed_message
+            return False
     except Exception as e:
+        # Catch any unexpected error during the process
+        error_msg = f"Unexpected error in send_text_command: {e}"
+        print(error_msg)
         if callback:
-             callback({"status": "error", "message": f"Error sending text command: {e}"})
+            callback({"status": "error", "message": error_msg})
         return False
 
 # --- New Function: Send Execution Error ---
+# Modified signature to accept request_id explicitly
 def send_execution_error(request_id, error_type, error_message, callback=None):
     """Send script execution error details back to the server."""
     global client_socket
@@ -462,19 +499,20 @@ def send_execution_error(request_id, error_type, error_message, callback=None):
             "error_type": error_type,
             "error_message": error_message
         }
-        message = json.dumps(message_data)
-        client_socket.sendall(message.encode())
-        print(f"[CLIENT INFO] Sent execution error for request_id: {request_id}")
-        # No specific callback needed here usually, but available
-        if callback: callback({"status": "info", "message": "Execution error sent"})
-        return True
-    except socket.error as e:
-        print(f"[CLIENT ERROR] Socket error sending execution error for {request_id}: {e}")
-        if callback: callback({"status": "error", "message": f"Socket error sending execution error: {e}"})
-        return False
+        # Corrected structure
+        if send_framed_message(client_socket, message_data, callback):
+            print(f"[CLIENT INFO] Sent execution error for request_id: {request_id}")
+            if callback: callback({"status": "info", "message": "Execution error sent"})
+            return True
+        else:
+            # Error already printed/handled by send_framed_message
+            return False
     except Exception as e:
-        print(f"[CLIENT ERROR] Error sending execution error for {request_id}: {e}")
-        if callback: callback({"status": "error", "message": f"Error sending execution error: {e}"})
+        # Catch any unexpected error during the process
+        error_msg = f"Unexpected error in send_execution_error: {e}"
+        print(error_msg)
+        if callback:
+            callback({"status": "error", "message": error_msg})
         return False
 # --- End New Function ---
 

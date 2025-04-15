@@ -274,17 +274,27 @@ def execute_scripts_timer():
     context = bpy.context
     needs_redraw = False
     if script_queue:
-        # Unpack script, transcription, AND request_id
-        script_to_execute, transcription, request_id = script_queue.pop(0)
-        logger.debug(f"Dequeued script for transcription: '{transcription}' (Request ID: {request_id})")
-        status = 'Unknown'
-        entry_timestamp = time.time()
+        popped_item = None # Initialize to None
+        try:
+            # --- Wrap the pop operation in a try/except ---
+            popped_item = script_queue.pop(0)
+        except IndexError:
+            # This handles the case where the queue becomes empty between the 'if script_queue:' check and the pop attempt.
+            logger.debug("execute_scripts_timer: Queue was empty when pop was attempted (potential race condition).")
+            return 1.0 # Return timer interval even if nothing was processed this cycle
+
+        # If pop was successful, proceed
+        if popped_item:
+            script_to_execute, transcription, original_request_id = popped_item # Unpack here
+            logger.debug(f"Dequeued script for transcription: '{transcription}' -- Request ID immediately after pop: {original_request_id}") # Log the unpacked ID
+            status = 'Unknown'
+            entry_timestamp = time.time()
         try:
             # Log context before execution
             logger.info(f"Context before exec: area={context.area.type if context.area else 'None'}, window={context.window.screen.name if context.window else 'None'}, mode={context.mode if hasattr(context, 'mode') else 'N/A'}")
             update_console(context, f"Executing script for: {transcription}")
 
-            # Execute the script
+            # Execute the script directly
             exec(script_to_execute, {"bpy": bpy})
 
             status = 'Success'
@@ -293,9 +303,10 @@ def execute_scripts_timer():
             status = 'Script Error'
             error_type = type(e).__name__
             error_message = str(e)
+            # Removed exception attribute logic, use original_request_id directly
             ui_error_msg = f"Script Execution Error for '{transcription}': {error_type} - {error_message}"
-            # Log detailed traceback
-            logger.error(f"Script Execution Error for '{transcription}' (Request ID: {request_id}):", exc_info=True)
+            # Log detailed traceback using the ID from the original tuple (original_request_id)
+            logger.error(f"Script Execution Error for '{transcription}' (Request ID: {original_request_id}):", exc_info=True)
             update_console(context, ui_error_msg)
 
             # --- Send error back to server ---
@@ -305,8 +316,10 @@ def execute_scripts_timer():
                 if addon_dir not in sys.path: sys.path.insert(0, addon_dir)
                 import blender_voice_client
                 if hasattr(blender_voice_client, 'send_execution_error'):
-                    logger.info(f"Sending execution error details back to server for request {request_id}...")
-                    blender_voice_client.send_execution_error(request_id, error_type, error_message)
+                    # Use the original_request_id variable directly
+                    logger.debug(f"Value of original_request_id JUST BEFORE sending error: {original_request_id}")
+                    logger.info(f"Sending execution error details back to server for request {original_request_id}...")
+                    blender_voice_client.send_execution_error(original_request_id, error_type, error_message)
                 else:
                     # This case should ideally not happen if client is updated
                     logger.warning("blender_voice_client.send_execution_error function not found.")
@@ -314,18 +327,19 @@ def execute_scripts_timer():
                 logger.error(f"Failed to send execution error to server: {send_err}", exc_info=True)
             # --- End error sending ---
 
-        # Always add to history
-        entry = {
-            'transcription': transcription, 'status': status,
-            'script': script_to_execute, 'timestamp': entry_timestamp,
-            'starred': False # New entries are never starred by default
-        }
-        command_history.append(entry)
-        logger.debug(f"Appended to command_history: {entry}")
-        needs_redraw = True
-        # Removed redundant check for transcription before adding to history
+            # Always add to history
+            entry = {
+                'transcription': transcription, 'status': status,
+                'script': script_to_execute, 'timestamp': entry_timestamp,
+                'starred': False # New entries are never starred by default
+            }
+            command_history.append(entry)
+            logger.debug(f"Appended to command_history: {entry}")
+            needs_redraw = True
+            # Removed redundant check for transcription before adding to history
 
-    if needs_redraw:
+    # Removed the extra check here as the try/except around pop handles it
+    if needs_redraw: # Only redraw if we actually processed something
         logger.debug("Tagging UI for redraw.")
         for window in context.window_manager.windows:
             for area in window.screen.areas:
@@ -333,7 +347,7 @@ def execute_scripts_timer():
                     for region in area.regions:
                         if region.type == 'UI':
                             region.tag_redraw()
-    return 0.5
+    return 1.0 # Increased timer interval to 1 second
 
 # --- Operators ---
 class BLENDER_OT_voice_command(bpy.types.Operator):
